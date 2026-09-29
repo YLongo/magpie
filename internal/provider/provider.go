@@ -254,8 +254,13 @@ func find(ps []Provider, id string) (Provider, bool) {
 func Find(id string) (*Provider, error) {
 	q := strings.ToLower(strings.TrimSpace(id))
 	all := All()
+	// an id before a name: a provider of the user's called WorkBuddy isn't
+	// the workbuddy subscription
+	if i := slices.IndexFunc(all, func(p Provider) bool { return p.ID == q }); i >= 0 {
+		return &all[i], nil
+	}
 	for _, p := range all {
-		if p.ID == q || strings.ToLower(p.Name) == q {
+		if strings.ToLower(p.Name) == q {
 			return &p, nil
 		}
 	}
@@ -401,7 +406,7 @@ func freeName(name string) string {
 }
 
 // accountIDs are the ids of the subscriptions magpie can list (account.go).
-var accountIDs = []string{"antigravity", "claude", "codex", CommandCodePlanID, "copilot", "cursor", "devin", "gemini", "grok", "kiro", "workbuddy", WorkBuddyAIID, "zcode"}
+var accountIDs = []string{"antigravity", "claude", "codex", CommandCodePlanID, "copilot", "cursor", "devin", "gemini", "grok", "kiro", "qoder", "workbuddy", WorkBuddyAIID, "zcode"}
 
 func stored(id string) bool {
 	for _, p := range load().Providers {
@@ -518,6 +523,12 @@ func normalize(p Provider) Provider {
 	}
 	p.Models = cleanList(p.Models)
 	p.Fallback = cleanList(p.Fallback)
+	// a provider saved under the id the qianfan preset carried its first
+	// day (qianfan-token-plan, v0.1.394) is the preset since renamed:
+	// its own id stays, so whatever the agents wired to it keeps routing
+	if p.Preset == "qianfan-token-plan" {
+		p.Preset = "baidu-qianfan"
+	}
 	if p.Routing != Ordered && p.Routing != Rotate && p.Routing != LeastUsed {
 		p.Routing = ""
 	}
@@ -525,6 +536,12 @@ func normalize(p Provider) Provider {
 		p.Affinity = ""
 	}
 	p.Catalog = strings.Join(p.Catalogs(), ", ")
+	// a Bedrock provider saved before the preset had its Responses API
+	// (#176) gets it where its chat completions are: the runtime serves both
+	// at /openai/v1
+	if p.Responses == "" && strings.HasSuffix(p.Chat, "/openai/v1") && p.IsBedrock() {
+		p.Responses = p.Chat
+	}
 	// a preset's provider keeps its headers too: the preset gives the
 	// endpoints and catalog, the headers say which workspace or app it is
 	p.Headers = cleanHeaders(p.Headers)
@@ -540,6 +557,14 @@ func normalize(p Provider) Provider {
 		}
 		if p.KeysURL == "" {
 			p.KeysURL = pr.KeysURL
+		}
+		// a region's own key page goes with its endpoints (Qianfan's pay
+		// as you go makes its keys on the IAM page, the plans at the
+		// plan console)
+		for _, r := range pr.Regions {
+			if r.KeysURL != "" && p.atRegion(r) {
+				p.KeysURL = r.KeysURL
+			}
 		}
 	}
 	return p
@@ -618,9 +643,12 @@ func (p Provider) Speaks() []Protocol {
 	return out
 }
 
-// ResponsesFirst: an OpenAI model on OpenAI's API or Copilot's, which is
-// best asked on the Responses API though Chat serves it too.
+// ResponsesFirst: an OpenAI model on OpenAI's API, Copilot's or Bedrock's,
+// which is best asked on the Responses API though Chat serves it too.
 func (p Provider) ResponsesFirst(model string) bool {
+	if p.Responses != "" && p.IsBedrock() {
+		return bedrockGPT(model)
+	}
 	if p.Responses == "" || (p.ID != "copilot" && HostOf(p.Responses) != "api.openai.com") {
 		return false
 	}
@@ -708,6 +736,17 @@ func (p Provider) IsBedrock() bool {
 // (apac.anthropic.claude-opus-5-5).
 func bedrockClaude(model string) bool {
 	return strings.Contains(strings.ToLower(model), "anthropic.claude")
+}
+
+// bedrockGPT is a Bedrock id of one of OpenAI's closed GPT models
+// (global.openai.gpt-6-luna), which its runtime serves on the Responses
+// API as well as chat completions, and with function tools and reasoning
+// on Responses alone (#176: "Function tools with reasoning_effort are not
+// supported for global.openai.gpt-6-luna in /v1/chat/completions"). Not
+// gpt-oss, which the runtime serves on chat completions alone.
+func bedrockGPT(model string) bool {
+	m := strings.ToLower(model)
+	return strings.Contains(m, "openai.gpt-") && !strings.Contains(m, "gpt-oss")
 }
 
 // HostOf pulls the host out of a URL, for display.

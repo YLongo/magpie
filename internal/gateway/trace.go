@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/yetone/magpie/internal/provider"
+	"github.com/yetone/magpie/internal/usage"
 )
 
 // traceKeep is how many requests the trace keeps.
@@ -26,6 +27,7 @@ type Route struct {
 	ID       int64     `json:"id"`
 	Time     time.Time `json:"time"`
 	Agent    string    `json:"agent"`
+	Kind     string    `json:"kind,omitempty"`   // what the call is for, as Call's
 	Model    string    `json:"model"`            // as the agent asked
 	Effort   string    `json:"effort,omitempty"` // the reasoning the agent asked for; "" for none
 	Provider string    `json:"provider"`         // the provider the model resolved to
@@ -43,6 +45,16 @@ type Route struct {
 	Error    string       `json:"error,omitempty"`
 	Millis   int64        `json:"ms,omitempty"`
 	Tokens   int          `json:"tokens,omitempty"`
+	Output   int          `json:"out,omitempty"` // of Tokens, the reply's
+	// TTFT: ms from the request to its reply's first content (text,
+	// reasoning or a tool call), FirstText to its first text, as Millis
+	// counts: streamed replies only (#196)
+	TTFT      int64 `json:"ttft,omitempty"`
+	FirstText int64 `json:"firstText,omitempty"`
+	// Served: the model the reply says answered, as the last try has it;
+	// Swapped: another than the one that try asked for
+	Served  string `json:"served,omitempty"`
+	Swapped bool   `json:"swapped,omitempty"`
 }
 
 // GroupRef is the routing group a request asked for.
@@ -145,10 +157,18 @@ type Try struct {
 	Done   bool      `json:"done"`
 	Status int       `json:"status,omitempty"`
 	Millis int64     `json:"ms,omitempty"`
-	Fail   string    `json:"fail,omitempty"` // why it failed, as rest tells it
-	Error  string    `json:"error,omitempty"`
-	Rest   *Rest     `json:"rest,omitempty"`  // how long it now sits out; none when it was the last to try
-	Again  int64     `json:"again,omitempty"` // ms waited before it was tried again, the last one left
+	// TTFT: ms from Start to its reply's first content, FirstText to its
+	// first text, when it streamed any (#196)
+	TTFT      int64 `json:"ttft,omitempty"`
+	FirstText int64 `json:"firstText,omitempty"`
+	// Served: the model its reply said answered, when it named one;
+	// Swapped: another model than Model, not just its dated name
+	Served  string `json:"served,omitempty"`
+	Swapped bool   `json:"swapped,omitempty"`
+	Fail    string `json:"fail,omitempty"` // why it failed, as rest tells it
+	Error   string `json:"error,omitempty"`
+	Rest    *Rest  `json:"rest,omitempty"`  // how long it now sits out; none when it was the last to try
+	Again   int64  `json:"again,omitempty"` // ms waited before it was tried again, the last one left
 }
 
 type planned struct {
@@ -306,3 +326,7 @@ func (s *Server) Trace(ctx context.Context, after int64, wait time.Duration) Tra
 		}
 	}
 }
+
+// swapped reports whether served is another model than sent: not the same
+// name, however dated, pinned or prefixed (usage.Swapped).
+func swapped(sent, served string) bool { return usage.Swapped(sent, served) }

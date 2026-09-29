@@ -100,6 +100,39 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       }
     });
 
+    await t.test("a request picked in the list, and Replay them all, stay under the pointer", async () => {
+      await reset();
+      await page.locator(".rt-day").nth(1).click();
+      await settle(page);
+      for (const i of [3, 7, 5]) {
+        const row = () => page.locator(".rt-req").nth(i);
+        await scrollTo(`.rt-req >> nth=${i}`);
+        // the list scrolls on its own: the reader brings the row into it
+        // (the click would, before it is measured)
+        const list = await page.locator(".rt-reqs").boundingBox();
+        await page.mouse.move(list.x + list.width / 2, list.y + 20);
+        for (let k = 0; k < 40; k++) {
+          const b = await row().boundingBox();
+          if (b.y + b.height <= list.y + list.height && b.y >= list.y) break;
+          await page.mouse.wheel(0, b.y < list.y ? -20 : 20);
+          await page.waitForTimeout(20);
+        }
+        await page.waitForTimeout(300);
+        const was = await row().evaluate((e) => e.getBoundingClientRect().top);
+        await row().click();
+        await settle(page);
+        assert.equal(await row().getAttribute("aria-pressed"), "true");
+        const is = await row().evaluate((e) => e.getBoundingClientRect().top);
+        assert(Math.abs(is - was) <= 1, `picking request ${i} moved the page ${Math.round(is - was)}px`);
+      }
+      const reqs = ".rt-req >> nth=0";
+      const was = await top(page, reqs);
+      await page.getByRole("button", { name: "Replay them all" }).click();
+      await settle(page);
+      const is = await top(page, reqs);
+      assert(Math.abs(is - was) <= 1, `Replay them all moved the list ${Math.round(is - was)}px`);
+    });
+
     await t.test("code can't take the page from a click", async () => {
       await reset();
       await page.locator(view).evaluate((v) => {
@@ -131,6 +164,30 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         const is = await top(page, "#" + id);
         assert(Math.abs(is - was) <= 1, `${id} moved the page ${Math.round(is - was)}px`);
       }
+    });
+
+    await t.test("a control under what it unrolls goes down with it", async () => {
+      await reset();
+      await page.locator(view).evaluate((v) => {
+        const s = document.createElement("div");
+        s.style.cssText = "flex:none;height:1600px";
+        const part = document.createElement("div");
+        part.id = "part"; part.style.flex = "none";
+        const head = document.createElement("div");
+        head.id = "head"; head.textContent = "head";
+        const fold = document.createElement("div");
+        const b = document.createElement("button");
+        b.id = "more"; b.textContent = "more"; b.dataset.unrolls = "";
+        b.onclick = () => { fold.style.height = "300px"; };
+        part.append(head, fold, b);
+        v.append(s, part, Object.assign(document.createElement("div"), { style: "flex:none;height:600px" }));
+      });
+      await scrollTo("#more");
+      const head = await top(page, "#head"), more = await top(page, "#more");
+      await page.locator("#more").click();
+      await settle(page);
+      assert(Math.abs((await top(page, "#head")) - head) <= 1, "what's above the fold must stay put");
+      assert(Math.abs((await top(page, "#more")) - more - 300) <= 1, "the control must go down with the rows");
     });
 
     await t.test("a click that asks to go somewhere does", async () => {

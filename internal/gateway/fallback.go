@@ -84,11 +84,14 @@ func (c candidate) restID() string {
 // who is the key or account itself, however many the provider has on: a
 // provider's one key rests as the provider, and as itself once another
 // is added, and a conversation it answered stays with it all the same.
+// An account is its user, signed in to or not: rest names the one the
+// agent is on by the provider's id alone, which a switch of the agent's
+// account hands to another (#209).
 func (c candidate) who() string {
 	if c.p.Account == nil && c.p.Key != "" {
 		return c.p.ID + "#" + provider.KeyID(c.p.Key)
 	}
-	return c.rest
+	return c.restKey()
 }
 
 // perKey is a provider once per key it has on, in order — or, for a
@@ -474,10 +477,12 @@ type holdWriter struct {
 
 	ended bool   // the stream's last event was written: the reply is whole
 	tail  []byte // the end of the last write, for a marker split across two
+
+	first firstToken // when its first content and text came (#196)
 }
 
 func newHoldWriter(w http.ResponseWriter, hold bool) *holdWriter {
-	return &holdWriter{w: w, hold: hold, header: http.Header{}}
+	return &holdWriter{w: w, hold: hold, header: http.Header{}, first: firstToken{start: time.Now()}}
 }
 
 func (h *holdWriter) Header() http.Header { return h.header }
@@ -513,6 +518,7 @@ func (h *holdWriter) Write(b []byte) (int, error) {
 		h.WriteHeader(http.StatusOK)
 	}
 	h.see(b)
+	h.first.see(b)
 	if h.passing {
 		return h.w.Write(b)
 	}

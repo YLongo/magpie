@@ -385,3 +385,5 @@ input.lib-setname:focus { border-color: var(--accent); box-shadow: 0 0 0 3px col
 .lib-modalcopy .note { color: var(--muted); font-size: 11.5px; }
 .lib-modalhint { grid-column: 1 / -1; font-size: 11.5px; color: var(--muted); line-height: 1.5; }
 .lib-addline { display: flex; flex-direction: column; gap: 5px; padding: 8px 6px 2px; }
+/* no color-mix() before Safari 16.2 (#220): the sticky head stays opaque */
+@supports not (color: color-mix(in srgb, red 50%, blue)) { .lib-head { background: var(--bg); } }

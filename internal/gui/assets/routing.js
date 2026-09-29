@@ -58,9 +58,9 @@
       // the newest request whose agent got an error, to see what it got
       s.classList.add("rt-errs");
       s.title = t("Show the latest request that failed");
-      s.addEventListener("click", (e) => {
+      s.addEventListener("click", () => {
         const r = listed().find((x) => x.done && x.status >= 400);
-        if (r) pick(r, e);
+        if (r) pick(r);
       });
     }
     statB.push(b);
@@ -126,6 +126,16 @@
     const d = new Date(s), n = new Date();
     const hm = d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
     return d.toDateString() === n.toDateString() ? hm : d.toLocaleDateString([], { weekday: "short" }) + " " + hm;
+  }
+  // how long a reply took to begin, and how fast it wrote after (#196)
+  const speedOf = (out, ms, ttft) => out && ttft && ms > ttft ? out / ((ms - ttft) / 1000) : 0;
+  function firstNote(r, tr) {
+    if (!tr.ttft) return "";
+    let s = " · " + t("first token in {ms}", { ms: took(tr.ttft) });
+    if (tr.firstText > tr.ttft) s += " · " + t("first text in {ms}", { ms: took(tr.firstText) });
+    const v = speedOf(r.out, tr.ms, tr.ttft);
+    if (v) s += " · " + t("{n} tok/s", { n: Math.round(v) });
+    return s;
   }
   const tokens = (n) => n >= 1e6 ? (n / 1e6).toFixed(1) + "M" : n >= 1e3 ? (n / 1e3).toFixed(1) + "k" : String(Math.round(n));
   const pct = (n) => Math.round(n) + "%";
@@ -429,7 +439,7 @@
     if (tr.effort) name += " " + t("at {level} reasoning", { level: tr.effort });
     if (!tr.done) return t("{who} is answering…", { who: name });
     if (tr.status < 400) {
-      const tk = r.tokens ? " · " + t("{n} tokens", { n: tokens(r.tokens) }) : "";
+      const tk = (r.tokens ? " · " + t("{n} tokens", { n: tokens(r.tokens) }) : "") + firstNote(r, tr);
       return i > 0
         ? t("{who} answered in {ms}{tk}. {agent} got one clean reply and never saw the {n} that failed first.", { who: name, ms: took(tr.ms), tk, agent, n: i })
         : t("{who} answered in {ms}{tk}.", { who: name, ms: took(tr.ms), tk });
@@ -460,6 +470,9 @@
 
   const routes = new Map(); // id → the latest of each route
   let seq = 0, mine = true, loaded = false, daysAt = 0;
+  let offMsg = ""; // why the trace can't be watched here, when it can't
+  // the request the window was opened on (?req=), from the tray panel
+  let wanted = document.body.classList.contains("window") && Number(params.get("req")) || 0;
   let cur = null;           // the route the header and the log tell of: the newest played
   let pinned = null;        // a past route picked from the strip
   let rows = new Map();     // id → { li, wire, st, bi, tg, w, rid, up }
@@ -893,6 +906,7 @@
       : main && main.model !== r.model
       ? t("{agent} asked for {model}: {name} serves it, and the vendor is asked for {sent}", { agent: agentName(r.agent), model: r.model, name: main.name, sent: main.model })
       : t("{agent} asked for {model}", { agent: agentName(r.agent), model: r.model }) + " → " + (main?.name || r.provider), ""]);
+    if (r.kind) items.push([kindWhy(r), "aside kind"]);
     items.push([affWhy(r, true) || ruleWhy(r, true) || firstWhy(r), "why"]);
     for (const s of nestedWhy(r)) items.push([s, "why"]);
     for (const a of asides(r)) items.push([a, "aside"]);
@@ -900,22 +914,63 @@
       items.push([tryWhy(r, i), tr.done ? (tr.status < 400 ? "ok" : "bad") : "wait"]);
       // what the vendor said, word for word: the why above is magpie's reading of it
       if (tr.done && tr.status >= 400 && tr.error) items.push([t("It said: {error}", { error: tr.error.length > 600 ? tr.error.slice(0, 600) + "…" : tr.error }), "aside said"]);
+      // the reply said another model answered it
+      if (tr.done && tr.status < 400 && tr.swapped) items.push([swapWhy(tr), "swap", tr]);
     });
     if (r.done && !r.tries.length) items.push([t("Nothing was tried: {error}", { error: r.error || r.status }), "bad"]);
-    steps.replaceChildren(...items.map(([s, c]) => el("li", c, s)));
+    steps.replaceChildren(...items.map(([s, c, tr]) => {
+      const li = el("li", c, s);
+      if (c === "aside kind") li.prepend(kindTag(r), " ");
+      if (c === "swap") li.prepend(swapTag(tr), " ");
+      return li;
+    }));
   }
 
-  // pick sets the stage to a past request, or back to live with the newest;
-  // the page goes up to the stage only for a request the reader clicked in
-  // the list (e, that click), never for a day or Live picked in its bar
-  function pick(r, e) {
+  // pick sets the stage to a past request, or back to live with the newest.
+  // The page stays where it is: a request clicked in the list stays under
+  // the pointer, and the stage and its story change above it (it used to
+  // go up to the stage, which read as the page jumping to its top)
+  function pick(r) {
     pinned = r.id === newest()?.id ? null : r;
     if (rp) { rp = null; rbar.hidden = true; }
     stopPlays();
     cur = r;
     sync(true); renderAll();
     say(affWhy(r, true) || ruleWhy(r, true) || firstWhy(r));
-    if (pinned && e && scrollOnPurpose(e)) { box.scrollIntoView({ block: "nearest", behavior: still() ? "auto" : "smooth" }); }
+  }
+
+  // what a call was for when it isn't a turn of the conversation, as
+  // Codex names it (x-openai-subagent): its own guardian review of an
+  // approval, a thread's title, memories… — each on the model Codex picks
+  // for it, so a list of Luna calls under a Sol composer reads as it is
+  const KIND = {
+    guardian: "Approval check", auto_review: "Approval check", guardian_review: "Approval check",
+    review: "Review", compact: "Compaction",
+    memory_consolidation: "Memory", memgen: "Memory", memory: "Memory",
+    thread_title: "Title", title: "Title",
+    collab_spawn: "Subagent", thread_spawn: "Subagent", agent_job: "Subagent",
+    luna_reserve: "Luna Reserve",
+  };
+  const kindName = (k) => KIND[k] ? t(KIND[k]) : k;
+  function kindTag(r) {
+    const k = el("span", "kind", kindName(r.kind));
+    k.title = kindWhy(r);
+    return k;
+  }
+  // a try whose reply said another model answered than the one it asked
+  // for: a vendor serving a cheaper model in its place, which only the
+  // reply's model field tells (its dated name is the same model)
+  function swapTag(tr, short) {
+    const k = el("span", "swap", short ? t("served {served}", { served: tr.served }) : t("requested {sent} · served {served}", { sent: tr.model, served: tr.served }));
+    k.title = swapWhy(tr);
+    return k;
+  }
+  const swapWhy = (tr) => t("The vendor was asked for {sent}, and its reply says {served} answered it: another model, not just {sent} under a dated name.", { sent: tr.model, served: tr.served });
+  window.swapWhy = swapWhy; // the Usage page's Requests say it too
+  function kindWhy(r) {
+    const agent = agentName(r.agent);
+    if (r.kind === "luna_reserve") return t("{agent} sent this turn on Luna Reserve, which it turns to once the plan's own allowance is used up; it picks the model itself.", { agent });
+    return t("{agent} made this call itself ({kind}), not as a turn of the conversation, and picks its model itself.", { agent, kind: kindName(r.kind) });
   }
 
   // who answered a request, or what its agent got
@@ -984,6 +1039,7 @@
     reqNote.textContent = day ? t(pastCut ? "the last {n} of {day}" : "{n} on {day}", { n: rs.length, day: dayName(day) })
       : t("the last {n} the gateway keeps", { n: rs.length });
     renderDays();
+    if (!reqs.style.maxHeight) requestAnimationFrame(fitReqs); // first shown
     // none yet: what the list is for in its place, and no accounts column
     // to tally nothing
     const none = !rs.length;
@@ -1000,6 +1056,9 @@
       renderActs(rs);
       return;
     }
+    // the list scrolls on its own; WebKit, emptied for a moment, would
+    // send it back to its top from under the row just picked
+    const listTop = reqs.scrollTop;
     reqs.replaceChildren(...rs.map((r) => {
       const [said, how, tr] = outcome(r);
       const b = el("button", "rt-req " + how);
@@ -1011,6 +1070,7 @@
       const sw = el("i", "ag");
       sw.style.setProperty("--agent", hueOf(r.agent));
       asked.append(sw, icon(ag?.icon || "generic"), el("span", "m", r.model));
+      if (r.kind) { asked.classList.add("kinded"); asked.append(kindTag(r)); }
       // the reasoning the model was sent at — the turn's pick, or the
       // agent's fitted to the model's levels; what the agent asked for is
       // in its title and the request's story
@@ -1021,15 +1081,18 @@
         ef.title = effortNote(r, tr);
         to.append(ef);
       }
+      if (tr?.swapped && tr.done && tr.status < 400) to.append(swapTag(tr, true)); // beside the model asked for
       const meta = [];
       if (r.tries.length > 1) meta.push(t("{n} tries", { n: r.tries.length }));
       if (r.done && r.ms) meta.push(took(r.ms));
+      if (r.done && r.ttft) meta.push(t("TTFT {ms}", { ms: took(r.ttft) }));
       if (r.tokens) meta.push(t("{n} tokens", { n: tokens(r.tokens) }));
       b.append(when, asked, to, el("span", "meta", meta.join(" · ")));
       b.title = `${agentName(r.agent)} · ${r.model} → ${r.provider}`;
-      b.onclick = (e) => pick(r, e);
+      b.onclick = () => pick(r);
       return b;
     }));
+    if (reqs.scrollTop !== listTop) reqs.scrollTop = listTop;
     renderActs(rs);
   }
 
@@ -1114,7 +1177,20 @@
       row.title = w.id;
       out.push(row);
     }
-    acts.replaceChildren(...out);
+    patch(acts, out);
+  }
+
+  // patch puts a list's new rows in, keeping each old one that is the same
+  // (and has no button, whose handler is the new one's): the accounts list
+  // emptied and filled again each second (its countdowns) had WebKit scroll
+  // the page, a frame at a time, as if the list had been shorter
+  function patch(box, rows) {
+    const old = [...box.children];
+    const same = (r, o) => o && !r.querySelector("button") && r.isEqualNode(o);
+    if (old.length === rows.length && rows.every((r, i) => same(r, old[i]))) return;
+    rows = rows.map((r, i) => (same(r, old[i]) ? old[i] : r));
+    rows.forEach((r, i) => { if (box.children[i] !== r) box.insertBefore(r, box.children[i] || null); });
+    while (box.children.length > rows.length) box.lastElementChild.remove();
   }
 
   function renderAll() { render(); renderLog(); renderHist(); }
@@ -1392,7 +1468,7 @@
       sw.style.setProperty("--agent", hueOf(r.agent));
       const [said] = outcome(r);
       row.append(el("span", "rp-n", t("request {i} of {n}", { i: g.n, n: p.plan.length })), sw,
-        el("b", "", agentName(r.agent)), el("code", "mdl", r.model), el("span", "rp-to", "→ " + said),
+        el("b", "", agentName(r.agent)), el("code", "mdl", r.model), ...(r.kind ? [kindTag(r)] : []), el("span", "rp-to", "→ " + said),
         el("span", "rp-at", t("sent {time}", { time: new Date(r.time).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false }) })));
       row.onclick = () => { cur = r; renderLog(); };
       return row;
@@ -1529,11 +1605,13 @@
         statB[2].textContent = d.totals.errors;
         if (!mine) {
           const gw = providers?.gateway;
-          offline(t(!gw?.running ? "The gateway isn't running, so nothing is routed."
+          offMsg = !gw?.running ? "The gateway isn't running, so nothing is routed."
             : gw.window ? "Another magpie serves the gateway; its routing plays live in that magpie's window."
             // magpie serve: its routing isn't shown anywhere
-            : "The gateway is served by a magpie without a window (magpie serve), so its routing can't be watched. Stop it and let this magpie serve the gateway to see routing live."));
+            : "The gateway is served by a magpie without a window (magpie serve), so its routing can't be watched. Stop it and let this magpie serve the gateway to see routing live.";
+          offline(t(offMsg));
           loaded = false;
+          renderPanel();
           await new Promise((r) => setTimeout(r, 5000));
           continue;
         }
@@ -1547,18 +1625,25 @@
         }
         for (const id of [...routes.keys()].sort((a, b) => a - b).slice(0, -60)) routes.delete(id);
         loaded = true;
+        offMsg = "";
+        renderPanel(first || d.routes.some((r) => r.done));
         // a request done is a day's count grown: heard of now and then
         if (first || (d.routes.some((r) => r.done) && performance.now() - daysAt > 15e3)) { daysAt = performance.now(); loadDays(); }
         if (first) {
           offline("");
           // the agents' names come with the app's state, which may not be here yet
           for (let i = 0; i < 30 && !state.agents.length; i++) await new Promise((res) => setTimeout(res, 100));
-          const r = newest();
+          renderPanel();
+          // the window opened from the tray panel's Routing tab on a request
+          const asked = wanted && routes.get(wanted), r = asked || newest();
+          if (wanted) { wanted = 0; params.delete("req"); history.replaceState(null, "", params.size ? "?" + params : location.pathname); }
+          if (asked && asked.id !== newest().id) pinned = asked;
           if (r) { cur = r; sync(true); say(affWhy(r, true) || ruleWhy(r, true) || firstWhy(r)); renderAll(); } else empty();
         } else {
           if (cur && routes.has(cur.id) && !rp) cur = routes.get(cur.id);
           if (pinned && routes.has(pinned.id)) pinned = routes.get(pinned.id);
           for (const id of fresh) if (!pinned && !rp) play(id);
+          for (const id of fresh.slice(-4)) pPlay(id);
           wake();
           renderAll();
         }
@@ -1577,6 +1662,7 @@
     // the caption said before, said again in these words: it was set as text
     if (loaded) { if (cur) { sync(true); renderAll(); capQ = []; say(affWhy(cur, true) || ruleWhy(cur, true) || firstWhy(cur)); } else empty(); }
     renderGroups();
+    renderPanel();
   }
   new MutationObserver(words).observe(document.documentElement, { attributes: true, attributeFilter: ["lang"] });
 
@@ -1590,7 +1676,9 @@
   const gHead = el("div", "row-head"), gList = el("div", "list rt-groups");
   const pHead = el("div", "row-head"), pList = el("div", "list rt-pools");
   gsec.append(gHead, gList, pHead, pList);
-  more.prepend(gsec);
+  // after the requests: a request picked in the list plays on the stage,
+  // so the list sits right under it
+  more.append(gsec);
   const ROUTE_OPTS = [["", "Smart"], ["order", "In order"], ["rotate", "In turn"], ["usage", "Least used"]];
   const AFF_OPTS = [["", "Auto"], ["session", "Session"], ["turn", "Within a turn"], ["off", "Off"]];
   const AFF_HINT = {
@@ -2024,7 +2112,327 @@
   window.addEventListener("focus", () => { if (shown()) loadGroups(); });
   loadGroups();
 
+  // ---------- where the reader is, as requests come ----------
+  // Every request redraws what is above the routing groups: the stage gains
+  // or loses a row, the story a line, the lists theirs. The view kept its
+  // scrollTop, so all of it pushed the groups down or pulled them up under
+  // the reader, a group being edited too (Jerell.OvO on Discord). The view
+  // keeps a part of itself where it is on the screen instead (keepInView in
+  // app.js): the groups, while they are in the upper half of the view or a
+  // field in them has the focus, else the lists, while they are; with
+  // neither (the stage in sight at the top), the view stays as it is.
+  const rv = $("#view-routing");
+  keepInView(rv, () => {
+    const mid = rv.getBoundingClientRect().top + rv.clientHeight / 2;
+    if (gsec.contains(document.activeElement) && gsec.offsetParent) return gsec;
+    return [gsec, hist].find((p) => p.offsetParent && p.getBoundingClientRect().top <= mid) || null;
+  });
+
+  // ---------- the tray panel's Routing tab ----------
+  // The gateway's latest requests, as they come, from the same trace the
+  // page above plays: who sent each, the model asked for, the provider and
+  // account it went to, the model that answered (marked when the reply
+  // names another), how it ended and when; today's calls and tokens over
+  // them, from the Usage page's count, and between the two a small stage:
+  // the agents that asked lately, magpie, and where their requests went,
+  // each new request a dot flying there and back. A click opens the
+  // window's Routing page on that request; nothing here moves the panel's
+  // scroll.
+  const pBox = document.body.classList.contains("panel") ? $("#panelRouting") : null;
+  if (pBox) pBox.hidden = false;
+  const P_ROWS = 6;
+  let today = null, todayAt = 0;
+  const pShown = () => pBox && document.body.dataset.ptab === "routing";
+  async function loadToday() {
+    todayAt = performance.now();
+    try { today = await api("usage?period=today"); } catch { return; }
+    renderPanel();
+  }
+  window.panelRoutingShown = () => { if (pShown() && performance.now() - todayAt > 5e3) loadToday(); pDraw(); };
+
+  // ---- the stage: agents → magpie → providers ----
+  // Three a side at most, each kept where it is while it stays: one that
+  // comes takes the place of the one heard of longest ago. A request plays
+  // as a dot in its agent's colour: to magpie, on to the account it was
+  // routed to, waiting there while that answers; a try that failed turns
+  // red and comes back for the next, and the answer flies home green (red
+  // when nobody could answer). Still, with reduced motion or the tab hidden.
+  const P_SIDE = 3;
+  const pStage = el("div", "pr-stage");
+  const pWires = document.createElementNS(NS, "svg"), pSky = document.createElementNS(NS, "svg");
+  pWires.setAttribute("class", "ps-wires");
+  pSky.setAttribute("class", "ps-sky");
+  const pFrom = el("div", "ps-col ps-from"), pTo = el("div", "ps-col ps-to"), pHub = el("div", "ps-hub");
+  pHub.innerHTML = '<svg viewBox="0 0 44 44" aria-hidden="true"><use href="#bird"/></svg>';
+  pStage.append(pWires, pFrom, pHub, pTo, pSky);
+  pStage.setAttribute("aria-hidden", "true");
+  let pAg = [], pDst = [];          // the keys on the stage, in their places
+  const pNodes = new Map();         // "a:<agent>" / "d:<seat>" → { node, wire }
+  const pPlays = new Set();         // the requests flying
+  let pTrips = [], pWait = [], pRaf = 0;
+  // pSeat is where a try went: a provider, and the account or key there
+  function pSeat(r, tr) {
+    const w = tr && tried(r, tr);
+    if (!w) return { key: r.provider || "?", name: r.provider || "?", sub: "" };
+    const sub = w.kind === "provider" ? "" : w.who || "";
+    return { key: `${w.provider}|${sub}`, name: w.name || w.provider, sub };
+  }
+  // pPlace keeps those on the stage that are still wanted where they are,
+  // the newcomers taking the free places
+  function pPlace(had, want) {
+    const out = had.map((k) => want.includes(k) ? k : null);
+    for (const k of want) if (!out.includes(k)) { const i = out.indexOf(null); if (i >= 0) out[i] = k; else out.push(k); }
+    return out.filter(Boolean).slice(0, P_SIDE);
+  }
+  function pDraw() {
+    if (!pBox || !pStage.isConnected) return;
+    const recent = [...routes.values()].sort((a, b) => b.id - a.id);
+    const flying = recent.filter((r) => pPlays.has(r.id));
+    const ags = [], dst = new Map(); // seat key → { name, sub, how }
+    for (const r of flying) {
+      if (!ags.includes(r.agent)) ags.push(r.agent);
+      for (const tr of r.tries) { const s = pSeat(r, tr); if (!dst.has(s.key)) dst.set(s.key, s); }
+    }
+    for (const r of recent) {
+      if (ags.length < P_SIDE && !ags.includes(r.agent)) ags.push(r.agent);
+      const tr = r.tries[r.tries.length - 1];
+      if (tr) { const s = pSeat(r, tr); if (!dst.has(s.key) && dst.size < P_SIDE) dst.set(s.key, s); }
+    }
+    // each account on the stage says how its latest try there went
+    for (const r of recent) {
+      for (const x of r.tries.slice().reverse()) {
+        const d = dst.get(pSeat(r, x).key);
+        if (d && !d.how) d.how = !x.done ? "wait" : x.status >= 400 ? "bad" : "ok";
+      }
+    }
+    pAg = pPlace(pAg, ags.slice(0, P_SIDE));
+    pDst = pPlace(pDst, [...dst.keys()].slice(0, P_SIDE));
+    const keep = new Set();
+    pFrom.replaceChildren(...pAg.map((id) => {
+      const n = pNode("a:" + id);
+      keep.add("a:" + id);
+      const ag = agentOf(id);
+      n.node.className = "ps-node ps-ag";
+      n.node.style.setProperty("--agent", hueOf(id));
+      n.wire.style.setProperty("--agent", hueOf(id));
+      n.node.replaceChildren(icon(ag?.icon || "generic"), el("span", "ps-name", agentName(id)));
+      n.node.title = agentName(id);
+      return n.node;
+    }));
+    pTo.replaceChildren(...pDst.map((k) => {
+      const n = pNode("d:" + k), d = dst.get(k);
+      keep.add("d:" + k);
+      n.node.className = "ps-node ps-dst " + (d.how || "ok");
+      const name = el("span", "ps-name", d.name);
+      if (d.sub) name.append(el("small", "", d.sub));
+      n.node.replaceChildren(el("i"), name);
+      n.node.title = d.sub ? `${d.name} · ${d.sub}` : d.name;
+      return n.node;
+    }));
+    for (const [k, n] of pNodes) if (!keep.has(k)) { n.wire.remove(); pNodes.delete(k); }
+    pHub.classList.toggle("busy", pPlays.size > 0);
+    pLayout();
+  }
+  function pNode(k) {
+    let n = pNodes.get(k);
+    if (!n) {
+      const wire = document.createElementNS(NS, "path");
+      wire.setAttribute("class", k[0] === "a" ? "ps-wire" : "ps-wire ps-out");
+      pWires.appendChild(wire);
+      n = { node: el("div"), wire, lit: 0 };
+      pNodes.set(k, n);
+    }
+    return n;
+  }
+  // the wires from each agent into magpie, and out of it to each account
+  function pLayout() {
+    const r = pStage.getBoundingClientRect();
+    if (!r.width) return;
+    for (const svg of [pWires, pSky]) svg.setAttribute("viewBox", `0 0 ${r.width} ${r.height}`);
+    const h = pHub.getBoundingClientRect(), hy = (h.top + h.bottom) / 2 - r.top;
+    for (const [k, n] of pNodes) {
+      const b = n.node.getBoundingClientRect();
+      if (!b.width) continue;
+      const y = (b.top + b.bottom) / 2 - r.top;
+      const [x1, y1, x2, y2] = k[0] === "a" ? [b.right - r.left + 3, y, h.left - r.left - 2, hy] : [h.right - r.left + 2, hy, b.left - r.left - 3, y];
+      const mx = (x1 + x2) / 2;
+      n.wire.setAttribute("d", `M${x1} ${y1} C${mx} ${y1} ${mx} ${y2} ${x2} ${y2}`);
+    }
+  }
+  new ResizeObserver(pLayout).observe(pStage);
+  // pFly carries a dot along a wire (back: from its end), lighting the wire
+  function pFly(dot, n, back, ms) {
+    if (!n) return Promise.resolve();
+    n.lit++;
+    if (n.wire.classList.contains("ps-out")) n.wire.style.setProperty("--agent", dot.style.getPropertyValue("--agent"));
+    n.wire.classList.add("on");
+    return new Promise((res) => {
+      pTrips.push({ dot, n, back, t0: performance.now(), ms, res });
+      if (!pRaf) pRaf = requestAnimationFrame(pTick);
+    }).finally(() => { if (!--n.lit) n.wire.classList.remove("on"); });
+  }
+  function pTick(ts) {
+    pRaf = 0;
+    const going = [];
+    for (const tr of pTrips) {
+      const k = pShown() && !still() ? Math.min(1, Math.max(0, (ts - tr.t0) / tr.ms)) : 1;
+      const e = k < .5 ? 2 * k * k : 1 - (-2 * k + 2) ** 2 / 2;
+      const L = tr.n.wire.getTotalLength?.() || 0;
+      if (L) {
+        const pt = tr.n.wire.getPointAtLength((tr.back ? 1 - e : e) * L);
+        tr.dot.setAttribute("cx", pt.x);
+        tr.dot.setAttribute("cy", pt.y);
+        tr.dot.removeAttribute("visibility");
+      }
+      if (k >= 1) tr.res(); else going.push(tr);
+    }
+    pTrips = going;
+    if (pTrips.length) pRaf = requestAnimationFrame(pTick);
+  }
+  // pUntil waits for the trace to say so (checked at each of its updates)
+  const pUntil = (f) => f() ? Promise.resolve() : new Promise((res) => pWait.push({ f, res, by: performance.now() + 180e3 }));
+  function pWake() {
+    const w = pWait;
+    pWait = [];
+    for (const x of w) if (x.f() || performance.now() > x.by) x.res(); else pWait.push(x);
+  }
+  const pRest = (ms) => new Promise((res) => setTimeout(res, pShown() && !still() ? ms : 0));
+  async function pPlay(id) {
+    if (!pBox || !pShown() || still() || pPlays.has(id) || pPlays.size >= 4) return;
+    let r = routes.get(id);
+    if (!r) return;
+    pPlays.add(id);
+    pDraw();
+    const dot = document.createElementNS(NS, "circle");
+    dot.setAttribute("r", 3.5);
+    dot.setAttribute("class", "ps-dot");
+    dot.setAttribute("visibility", "hidden");
+    dot.style.setProperty("--agent", hueOf(r.agent));
+    pSky.appendChild(dot);
+    const home = () => pNodes.get("a:" + r.agent);
+    try {
+      await pFly(dot, home(), false, 420);
+      for (let i = 0; ; i++) {
+        await pUntil(() => { r = routes.get(id) || r; return r.tries.length > i || r.done; });
+        const tr = r.tries[i];
+        if (!tr) break;
+        const k = "d:" + pSeat(r, tr).key;
+        pDraw();
+        const n = pNodes.get(k);
+        await pFly(dot, n, false, 460);
+        // it waits at the account while that answers
+        if (n) n.lit++;
+        dot.classList.add("wait");
+        await pUntil(() => { r = routes.get(id) || r; return r.tries[i]?.done || r.done; });
+        dot.classList.remove("wait");
+        if (n && !--n.lit) n.wire.classList.remove("on");
+        const t2 = r.tries[i];
+        if (t2?.status >= 400) {
+          dot.classList.add("bad");
+          await pRest(260);
+          await pFly(dot, n, true, 360);
+          await pUntil(() => { r = routes.get(id) || r; return r.tries.length > i + 1 || r.done; });
+          if (r.tries.length > i + 1) { dot.classList.remove("bad"); continue; }
+          await pFly(dot, home(), true, 420); // nobody left: the error goes home
+          break;
+        }
+        dot.classList.add("ok");
+        await pFly(dot, n, true, 420);
+        await pFly(dot, home(), true, 420);
+        break;
+      }
+    } finally {
+      dot.classList.add("gone");
+      setTimeout(() => dot.remove(), 300);
+      pPlays.delete(id);
+      pDraw();
+    }
+  }
+  // renderPanel draws the tab; counted is a request just done, for today's
+  // totals to be read again (now and then)
+  function renderPanel(counted) {
+    if (!pBox) return;
+    if (counted && (!todayAt || performance.now() - todayAt > 5e3)) loadToday();
+    const v = $("#view-agents"), keep = v.scrollTop;
+    const head = el("div", "pr-head");
+    const sum = el("span", "pr-today");
+    if (today) {
+      sum.append(el("span", "", t("today")), " ",
+        el("b", "", String(today.calls || 0)), " ", t(today.calls === 1 ? "call" : "calls"), " · ",
+        el("b", "", fmtN(tokensOf(today) || 0)), " ", t("tokens"));
+    } else sum.append(el("span", "skeleton pr-sk"));
+    const open = el("button", "text", t("Open Routing"));
+    open.type = "button";
+    open.onclick = (e) => { api("window/main?view=routing", {}); e.currentTarget.blur(); };
+    head.append(el("span", "rt-livedot"), sum, el("span", "grow"), open);
+    const out = [head];
+    const rs = [...routes.values()].sort((a, b) => b.id - a.id).slice(0, P_ROWS);
+    if (!offMsg && loaded && rs.length) out.push(pStage);
+    if (offMsg) out.push(el("p", "pr-none", t(offMsg)));
+    else if (!loaded) for (let i = 0; i < 3; i++) out.push(el("span", "skeleton pr-sk-row"));
+    else if (!rs.length) {
+      const p = el("div", "pr-none");
+      p.append(el("b", "", t("No request yet")), t("Every request an agent sends to magpie shows up here, routed for real."));
+      out.push(p);
+    } else {
+      const list = el("div", "pr-list");
+      for (const r of rs) list.append(panelRow(r));
+      out.push(list);
+    }
+    pBox.replaceChildren(...out);
+    if (v.scrollTop !== keep) v.scrollTop = keep;
+    pDraw();
+    pWake();
+    fit();
+  }
+  function panelRow(r) {
+    const [, how, tr] = outcome(r);
+    const w = tr && tried(r, tr);
+    const b = el("button", "pr-req " + how);
+    b.type = "button";
+    const ag = agentOf(r.agent);
+    const asked = el("span", "pr-a");
+    asked.append(icon(ag?.icon || "generic"), el("span", "pr-who", agentName(r.agent)), el("code", "m", r.model));
+    if (r.kind) asked.append(kindTag(r));
+    const when = el("span", "at", new Date(r.time).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit", hourCycle: "h23" }));
+    // where it went: the provider, the account or key, and the model that
+    // answered — marked when the reply names another than the one sent
+    const to = el("span", "pr-to");
+    to.append(el("i", "", "→"));
+    const where = w ? (w.kind === "provider" || !w.who ? w.name || w.provider : `${w.name || w.provider} · ${w.who}`) : r.provider;
+    if (!r.done) to.append(el("span", "pr-where", w ? t("{who} is answering…", { who: where }) : t("routing…")));
+    else if (r.status >= 400) {
+      const last = r.tries[r.tries.length - 1];
+      to.append(el("span", "pr-where", last ? `${r.status} · ${failWord(last.fail)}` : `${r.status || ""} ${r.error || ""}`.trim()));
+    } else {
+      to.append(el("span", "pr-where", where));
+      const model = tr?.model || w?.model;
+      if (model) to.append(el("span", "pr-m", model));
+      if (tr?.swapped && tr.done) to.append(swapTag(tr, true));
+    }
+    const meta = [];
+    if (r.tries.length > 1) meta.push(t("{n} tries", { n: r.tries.length }));
+    if (r.tokens) meta.push(t("{n} tokens", { n: tokens(r.tokens) }));
+    if (r.done && r.ms) meta.push(took(r.ms));
+    b.append(asked, when, to, el("span", "meta", meta.join(" · ")));
+    b.title = `${agentName(r.agent)} · ${r.model} → ${r.provider}`;
+    b.onclick = (e) => { api("window/main?view=routing&req=" + r.id, {}); e.currentTarget.blur(); };
+    return b;
+  }
+
   new ResizeObserver(() => layout()).observe(stage);
+  // the list is as tall as leaves the stage in sight above it: the reader
+  // scrolls the list, not the page, and a request picked plays in view.
+  // Its top stays where it is as it is sized, so a row just clicked does too
+  function fitReqs() {
+    const v = $("#view-routing");
+    if (v.hidden || !reqs.offsetParent) return;
+    const above = reqs.getBoundingClientRect().top - box.getBoundingClientRect().top;
+    const room = v.clientHeight - above - 28;
+    reqs.style.maxHeight = Math.round(Math.max(216, Math.min(420, room))) + "px";
+  }
+  new ResizeObserver(fitReqs).observe($("#view-routing"));
+  new ResizeObserver(fitReqs).observe(box);
   words();
   requestAnimationFrame(frame);
   poll();

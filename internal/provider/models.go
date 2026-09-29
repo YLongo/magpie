@@ -3,9 +3,11 @@ package provider
 import (
 	"context"
 	"fmt"
+	"log"
 	"slices"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/yetone/magpie/internal/catalog"
@@ -100,8 +102,9 @@ func (p Provider) Fetch(ctx context.Context) ([]catalog.Model, error) {
 		return p.Account.models(), nil
 	}
 	// a vendor with no list to ask (Bedrock's runtime): the preset's
-	// models are it, unless the user said where one is
-	if pr := Preset(p.Preset); pr != nil && pr.NoList && strings.TrimSpace(p.ModelsURL) == "" {
+	// models are it, unless the user said where one is or the provider
+	// sits at a region that serves one after all
+	if pr := Preset(p.Preset); pr != nil && pr.NoList && strings.TrimSpace(p.ModelsURL) == "" && !p.listRegion(pr) {
 		return catalog.Chat(p.planModels(nil)), nil
 	}
 	// Only keys in use. An off key is not asked, and its list does not
@@ -114,6 +117,45 @@ func (p Provider) Fetch(ctx context.Context) ([]catalog.Model, error) {
 		return nil, err
 	}
 	return catalog.Chat(ms), catalog.SaveLive(p.ID, base, ms)
+}
+
+// newFetches is when each account with no list from its vendor yet was
+// last asked for one by FetchNew.
+var newFetches = struct {
+	sync.Mutex
+	m map[string]time.Time
+}{m: map[string]time.Time{}}
+
+// newFetchRetry is how long FetchNew leaves an account whose list it
+// couldn't get before asking again.
+var newFetchRetry = 10 * time.Minute
+
+// FetchNew asks each signed-in account whose vendor list magpie hasn't
+// fetched yet for it, each for at most timeout. Start-up does this for the
+// accounts there then; an account signed in while magpie runs (in magpie or
+// in the agent's own app) otherwise showed magpie's built-in list, fewer
+// models than the vendor serves, until Refresh was clicked (#204). One that
+// fails is asked again after newFetchRetry, not each time.
+func FetchNew(timeout time.Duration) {
+	newFetches.Lock()
+	defer newFetches.Unlock()
+	for _, p := range All() {
+		if p.Account == nil || !p.Ready() {
+			continue
+		}
+		if _, ok := p.Fetched(); ok {
+			continue
+		}
+		if t, ok := newFetches.m[p.ID]; ok && time.Since(t) < newFetchRetry {
+			continue
+		}
+		newFetches.m[p.ID] = time.Now()
+		ctx, cancel := context.WithTimeout(context.Background(), timeout)
+		if _, err := p.Fetch(ctx); err != nil {
+			log.Println(p.ID + ": " + err.Error())
+		}
+		cancel()
+	}
 }
 
 // fetchOne asks the first endpoint that answers, with p's key.
@@ -149,6 +191,43 @@ func (p Provider) fetchOne(ctx context.Context) ([]catalog.Model, string, error)
 	// the endpoints are kept as they were: a vendor with no list (or one
 	// that wants what the key can't give) still serves the models typed in
 	return nil, "", errorf("%s — type its model ids in by hand, or give the URL its list is at", strings.Join(errs, "; "))
+}
+
+// listRegion reports whether the provider sits at one of its preset's
+// regions that serves a model list although the preset as a whole has
+// none (Region.Lists): Qianfan's pay as you go at the v2 root answers
+// /v2/models, while the plans' /tokenplan/ endpoints answer nothing.
+func (p Provider) listRegion(pr *PresetDef) bool {
+	for _, r := range pr.Regions {
+		if r.Lists && p.atRegion(r) {
+			return true
+		}
+	}
+	return false
+}
+
+// atRegion reports whether the provider sits at a region's endpoints,
+// by path — the host may be another (a mirror, a test).
+func (p Provider) atRegion(r Region) bool {
+	for _, a := range []string{p.Chat, p.Responses, p.Anthropic} {
+		for _, b := range []string{r.Chat, r.Responses, r.Anthropic} {
+			if a != "" && b != "" && basePath(a) == basePath(b) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// basePath is a base URL's path, without scheme or host.
+func basePath(raw string) string {
+	if i := strings.Index(raw, "://"); i >= 0 {
+		raw = raw[i+3:]
+	}
+	if i := strings.IndexAny(raw, "/#?"); i >= 0 {
+		return raw[i:]
+	}
+	return ""
 }
 
 // planModels keeps a plan's own models of a vendor's list (PresetDef.Only),
@@ -368,19 +447,87 @@ func (p Provider) Known(model string) []string {
 			return []string{l}
 		}
 	}
-	return catalog.EffortsOf(model)
+	// one of the vendor's own its list leaves out (a preview) or typed in:
+	// the vendor's word on it, before the others'
+	if e, ok := catalog.ListedBy(p.Catalogs(), model); ok {
+		return e
+	}
+	return borrowedEfforts(model)
+}
+
+// Levelless reports whether the model is known to have no reasoning levels
+// to pick from, as against not known to have any: its vendor or its maker
+// lists it with a thinking switch alone, or nothing (Xiaomi's
+// mimo-v2.6-flash), and the user gave it none.
+func (p Provider) Levelless(model string) bool {
+	if len(p.Efforts(model)) > 0 {
+		return false
+	}
+	if e, ok := catalog.ListedBy(p.Catalogs(), model); ok {
+		return len(e) == 0
+	}
+	e, ok := catalog.ListedBy(makerCatalogs(), model)
+	return ok && len(e) == 0
 }
 
 // effortsOf is a model's reasoning levels: its vendor's, as models.dev
 // lists them, or — for a vendor models.dev doesn't list the model under (a
-// custom provider, a proxy) — the ones the others serving it give. A model
-// models.dev lists for this vendor without levels takes none: the vendor
-// says it has none to pick from.
+// custom provider, a proxy) — its maker's, else the ones the others serving
+// it give. A model models.dev lists for this vendor without levels takes
+// none: the vendor says it has none to pick from.
 func effortsOf(m catalog.Model) []string {
 	if len(m.Efforts) > 0 || m.Provider != "" {
 		return m.Efforts
 	}
-	return catalog.EffortsOf(m.ID)
+	return borrowedEfforts(m.ID)
+}
+
+// borrowedEfforts are the reasoning levels of a model its provider has no
+// word on: its maker's, when a vendor of magpie's presets makes it — none
+// for Xiaomi's mimo-v2.6-flash, which takes a thinking switch alone and
+// turns away the max resellers list for it (#214) — else those most of the
+// providers giving any give it (a Volcengine endpoint's glm-5.3-flash).
+func borrowedEfforts(id string) []string {
+	if e, ok := catalog.ListedBy(makerCatalogs(), id); ok {
+		return e
+	}
+	return catalog.EffortsOf(id)
+}
+
+// makerCatalogs are the models.dev ids of the vendors among the presets
+// that make the models they serve, in the presets' order.
+var makerCatalogs = sync.OnceValue(func() []string {
+	var out []string
+	for _, pr := range presets {
+		if pr.Kind != KindVendor || pr.Hosts {
+			continue
+		}
+		for _, c := range (Provider{Catalog: pr.Catalog}).Catalogs() {
+			if !slices.Contains(out, c) {
+				out = append(out, c)
+			}
+		}
+	}
+	return out
+})
+
+// ListPrice is a model's list price as its vendor's models.dev entry gives
+// it, else as its maker's does (#224): a subscription (Codex's ChatGPT
+// account, Copilot) or a relay with no models.dev id of its own is priced
+// at gpt-6-astra's or gemini-3.8-flash's maker's price, as a Claude
+// account is at Anthropic's.
+func (p Provider) ListPrice(model string) (catalog.Price, bool) {
+	if pr, ok := catalog.PricedBy(p.Catalogs(), model); ok {
+		return pr, true
+	}
+	return MakerPrice(model)
+}
+
+// MakerPrice is a model's list price as the first vendor among the presets
+// that makes the models it serves lists it; for a call whose provider has
+// gone since.
+func MakerPrice(model string) (catalog.Price, bool) {
+	return catalog.PricedBy(makerCatalogs(), model)
 }
 
 // Chosen reports whether a model is exposed.

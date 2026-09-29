@@ -1,16 +1,56 @@
 package main
 
 import (
+	"context"
 	"fmt"
+	"io"
+	"os"
+	"slices"
 	"strings"
+	"time"
 
 	"github.com/yetone/magpie/internal/agent"
+	"github.com/yetone/magpie/internal/fx"
+	"github.com/yetone/magpie/internal/settings"
 	stats "github.com/yetone/magpie/internal/usage"
 )
 
+// costCurrency and costRate are cost's currency and, for cny, the
+// CNY-per-USD rate to show it at — loadCostCurrency sets them once at a
+// command's start, not again for every row it prints.
+var (
+	costCurrency = "usd"
+	costRate     float64
+)
+
+// loadCostCurrency reads Settings' currency choice and, only for cny, the
+// exchange rate (internal/fx, its own 12h cache — this asks the network
+// only when that's stale).
+func loadCostCurrency() {
+	costCurrency = settings.Load().Currency
+	costRate = 0
+	if costCurrency == "cny" {
+		ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+		costRate = fx.Get(ctx).CNYPerUSD
+		cancel()
+	}
+}
+
 // usageCmd: `magpie usage [today|7d|30d|all]` — tokens and cost per agent,
-// model and session
+// model and session; with --csv, every request of the period as CSV, one
+// row each, to set beside a vendor's bill
 func usageCmd(args []string) error {
+	return usageTo(os.Stdout, args)
+}
+
+func usageTo(out io.Writer, args []string) error {
+	asCSV := false
+	if i := slices.Index(args, "--csv"); i > 0 {
+		asCSV, args = true, slices.Delete(slices.Clone(args), i, i+1)
+	}
+	if len(args) > 2 {
+		return fmt.Errorf("usage: magpie usage [--csv] [today|7d|30d|all]")
+	}
 	period := stats.Month
 	if len(args) > 1 {
 		switch strings.ToLower(args[1]) {
@@ -23,9 +63,14 @@ func usageCmd(args []string) error {
 		case "all":
 			period = stats.All
 		default:
-			return fmt.Errorf("usage: magpie usage [today|7d|30d|all]")
+			return fmt.Errorf("usage: magpie usage [--csv] [today|7d|30d|all]")
 		}
 	}
+	if asCSV {
+		rows, _, _ := stats.Ledger(period, stats.Filter{})
+		return stats.WriteCSV(out, rows)
+	}
+	loadCostCurrency()
 	s := stats.Summarize(period)
 	title := map[stats.Period]string{stats.Today: "today", stats.Week: "last 7 days", stats.Month: "last 30 days", stats.All: "all time"}[s.Period]
 	if s.Calls == 0 {
@@ -58,7 +103,7 @@ func usageCmd(args []string) error {
 			if s.Tokens() > 0 {
 				share = fmt.Sprintf("%3.0f%%", 100*float64(g.Tokens())/float64(s.Tokens()))
 			}
-			fmt.Println("  "+pad(name(g), w), muted.Render(share), pad(fmtTokens(g.Tokens()), 7), faint.Render(pad(plural(g.Calls, "call"), 10)), cost(g.Totals))
+			fmt.Println("  "+pad(name(g), w), muted.Render(share), pad(fmtTokens(g.Tokens()), 7), faint.Render(pad(plural(g.Calls, "call"), 10)), cost(g.Totals), faint.Render(speed(g.Totals)))
 		}
 	}
 	table("agents", s.Agents, func(g stats.Group) string {
@@ -86,6 +131,26 @@ func usageCmd(args []string) error {
 	return nil
 }
 
+// speed is how long the timed calls took to their first token, and how
+// fast they wrote after it (#196); "" when none was timed.
+func speed(t stats.Totals) string {
+	if t.Timed == 0 {
+		return ""
+	}
+	out := "ttft " + fmtMs(t.MeanTTFT())
+	if v := t.Speed(); v > 0 {
+		out += fmt.Sprintf(" · %.0f tok/s", v)
+	}
+	return out
+}
+
+func fmtMs(ms int64) string {
+	if ms < 1000 {
+		return fmt.Sprintf("%d ms", ms)
+	}
+	return fmt.Sprintf("%.1f s", float64(ms)/1000)
+}
+
 func plural(n int, unit string) string {
 	if n == 1 {
 		return "1 " + unit
@@ -109,20 +174,14 @@ func fmtTokens(n int) string {
 	return fmt.Sprint(n)
 }
 
-// cost renders list-price cost, saying when some calls could not be priced.
+// cost renders list-price cost, saying when some calls could not be
+// priced, in costCurrency at costRate (set once per command by
+// loadCostCurrency).
 func cost(t stats.Totals) string {
 	if t.Cost == 0 && t.Unpriced > 0 {
 		return faint.Render("no price")
 	}
-	var s string
-	switch {
-	case t.Cost >= 100:
-		s = fmt.Sprintf("$%.0f", t.Cost)
-	case t.Cost >= 1:
-		s = fmt.Sprintf("$%.2f", t.Cost)
-	default:
-		s = fmt.Sprintf("$%.3f", t.Cost)
-	}
+	s := stats.FormatCost(t.Cost, costCurrency, costRate)
 	if t.Unpriced > 0 {
 		s += muted.Render("+")
 	}

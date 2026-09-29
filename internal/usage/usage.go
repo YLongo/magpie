@@ -8,6 +8,7 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -22,25 +23,40 @@ import (
 
 // Record is one call.
 type Record struct {
-	Time       time.Time `json:"t"`
-	Agent      string    `json:"agent"` // magpie agent id, or the client's product name
-	Provider   string    `json:"provider"`
-	Host       string    `json:"host,omitempty"` // where the call went: provider.Where then
-	Model      string    `json:"model"`          // the provider's model id
-	Input      int       `json:"in"`
-	Output     int       `json:"out"`
-	CacheRead  int       `json:"cache_read,omitempty"`
-	CacheWrite int       `json:"cache_write,omitempty"`
-	Reasoning  int       `json:"reasoning,omitempty"`
+	Time     time.Time `json:"t"`
+	Agent    string    `json:"agent"` // magpie agent id, or the client's product name
+	Provider string    `json:"provider"`
+	Host     string    `json:"host,omitempty"` // where the call went: provider.Where then
+	Model    string    `json:"model"`          // the provider's model id
+	// Requested is the model id the agent asked for (a magpie alias, a
+	// routing group, provider/model…), and Served the model the vendor's
+	// reply says answered, when it named one: a ledger to set beside the
+	// vendor's own bill. Neither is in a record written before they were.
+	Requested  string `json:"req,omitempty"`
+	Served     string `json:"served,omitempty"`
+	Input      int    `json:"in"`
+	Output     int    `json:"out"`
+	CacheRead  int    `json:"cache_read,omitempty"`
+	CacheWrite int    `json:"cache_write,omitempty"`
+	Reasoning  int    `json:"reasoning,omitempty"`
 	// Effort is the reasoning the model was asked for — a routing group's
 	// pick for the turn, or the agent's own — as it takes it; "" for none
 	Effort string `json:"effort,omitempty"`
 	Millis int64  `json:"ms"`
-	Status int    `json:"status"`
+	// TTFT: ms from the request to its reply's first content — text,
+	// reasoning or a tool call — and FirstText to its first text, counted
+	// as Millis is, so Millis-TTFT is how long the reply took to write;
+	// none for a reply that wasn't streamed (#196)
+	TTFT      int64 `json:"ttft_ms,omitempty"`
+	FirstText int64 `json:"first_text_ms,omitempty"`
+	Status    int   `json:"status"`
 	// Session is the conversation the call was part of, as its agent names
 	// it (X-Magpie-Session, or the session header Claude Code, Codex or
 	// OpenCode sends): several sessions on one model told apart
 	Session string `json:"session,omitempty"`
+	// Kind is what the agent made the call for when it isn't a turn of
+	// the conversation: a Codex subagent's (review, compact, guardian…)
+	Kind string `json:"kind,omitempty"`
 }
 
 // Path is the log file: ~/.config/magpie/usage.jsonl (XDG-aware).
@@ -162,10 +178,57 @@ type Totals struct {
 	Reasoning  int     `json:"reasoning"`
 	Cost       float64 `json:"cost"`     // USD at list prices, for the priced calls
 	Unpriced   int     `json:"unpriced"` // calls with tokens but no known price
+	// Timed: the answered calls whose first token was timed (streamed),
+	// TTFT the sum of their ttft_ms; DecodeMs the time from it to the end
+	// of those that wrote any, over which DecodeOut tokens came: their
+	// mean wait, and how fast they wrote (#196)
+	Timed     int   `json:"timed,omitempty"`
+	TTFT      int64 `json:"ttft_ms,omitempty"`
+	DecodeMs  int64 `json:"decode_ms,omitempty"`
+	DecodeOut int   `json:"decode_out,omitempty"`
 }
 
 // Tokens is what went in and out, excluding cache traffic.
 func (t Totals) Tokens() int { return t.Input + t.Output }
+
+// MeanTTFT is the mean ms to the first token of the timed calls, 0 for none.
+func (t Totals) MeanTTFT() int64 {
+	if t.Timed == 0 {
+		return 0
+	}
+	return t.TTFT / int64(t.Timed)
+}
+
+// Speed is how fast the timed calls wrote, in tokens a second after their
+// first: 0 for none.
+func (t Totals) Speed() float64 {
+	if t.DecodeMs <= 0 {
+		return 0
+	}
+	return float64(t.DecodeOut) / (float64(t.DecodeMs) / 1000)
+}
+
+// FormatCost renders a list-price cost, kept in USD everywhere it's
+// stored, as the CLI and TUI show it: at amountUSD's own price when
+// currency isn't "cny", else converted at rate (CNY per one USD, from
+// internal/fx; a rate of 0 or below also falls back to USD, a stale or
+// missing rate being no reason to hide the number). Whole dollars or yuan
+// above 100, cents above 1, else thousandths, so a fraction of a cent
+// still shows as something.
+func FormatCost(amountUSD float64, currency string, rate float64) string {
+	amount, sign := amountUSD, "$"
+	if currency == "cny" && rate > 0 {
+		amount, sign = amountUSD*rate, "¥"
+	}
+	switch {
+	case amount >= 100:
+		return fmt.Sprintf("%s%.0f", sign, amount)
+	case amount >= 1:
+		return fmt.Sprintf("%s%.2f", sign, amount)
+	default:
+		return fmt.Sprintf("%s%.3f", sign, amount)
+	}
+}
 
 func (t *Totals) add(r Record, price *catalog.Price) {
 	t.Calls++
@@ -177,6 +240,14 @@ func (t *Totals) add(r Record, price *catalog.Price) {
 	t.CacheRead += r.CacheRead
 	t.CacheWrite += r.CacheWrite
 	t.Reasoning += r.Reasoning
+	if r.TTFT > 0 && r.Status < 400 {
+		t.Timed++
+		t.TTFT += r.TTFT
+		if r.Output > 0 && r.Millis > r.TTFT {
+			t.DecodeMs += r.Millis - r.TTFT
+			t.DecodeOut += r.Output
+		}
+	}
 	if r.Input+r.Output == 0 {
 		return
 	}
@@ -281,27 +352,7 @@ func summarize(p Period, now time.Time, recs []Record) Summary {
 		}
 	}
 
-	prices := map[string]*catalog.Price{}
-	priceOf := func(r Record) *catalog.Price {
-		k := r.Provider + "/" + r.Model
-		if pr, ok := prices[k]; ok {
-			return pr
-		}
-		var pr *catalog.Price
-		for _, p := range provider.All() {
-			if p.ID == r.Provider {
-				for _, c := range p.Catalogs() {
-					if v, ok := catalog.PriceOf(c, r.Model); ok {
-						pr = &v
-						break
-					}
-				}
-				break
-			}
-		}
-		prices[k] = pr
-		return pr
-	}
+	priceOf := pricer()
 	// the places each provider id went in the period, and goes now
 	hosts := map[string]map[string]bool{}
 	for _, r := range recs {

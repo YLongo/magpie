@@ -45,7 +45,8 @@
 
 <nav class="ptabs" id="ptabs" hidden>
   <button type="button" data-ptab="agents"><span data-t>Agents</span><em id="ptabN"></em></button>
-  <button type="button" data-ptab="usage"><span data-t>Usage</span></button>
+  <button type="button" data-ptab="usage"><span data-t>Allowances</span></button>
+  <button type="button" data-ptab="routing"><span data-t>Routing</span></button>
   <button type="button" data-ptab="profiles"><span data-t>Profiles</span></button>
 </nav>
 
@@ -57,6 +58,7 @@
     <button class="text" id="save" data-t>＋ Save current</button>
   </section>
   <section class="panel-quota" id="panelQuota" hidden></section>
+  <section class="panel-routing" id="panelRouting" hidden></section>
 </main>
 
 <main class="view" id="view-providers" hidden>
@@ -72,7 +74,7 @@
   <div class="list gwcard">
     <div class="row gw" id="gateway"></div>
   </div>
-  <div class="row-head"><span class="label" data-t>Connect</span><span class="grow"></span><span class="note" id="connectNote"></span></div>
+  <div class="row-head"><button class="fold" id="foldConnect" aria-expanded="true" aria-controls="connect"><span class="label" data-t>Connect</span></button><span class="grow"></span><span class="note" id="connectNote"></span></div>
   <section class="list connect" id="connect"></section>
   <div class="row-head"><button class="fold" id="foldModels" aria-expanded="true" aria-controls="gwModels"><span class="label" data-t>Models</span><span class="note" id="modelsCount"></span></button><span class="grow"></span><button class="text" id="copyModels" data-t>Copy all ids</button></div>
   <div class="list" id="gwModels"></div>
@@ -111,7 +113,20 @@
     <div class="list" id="usageModels"></div>
     <p class="usage-note" id="usageNote"></p>
   </div>
-  <div class="usage-pane" id="sessionsPane" hidden>
+  <div class="usage-pane" id="ledgerPane" hidden>
+    <div class="sess-tools">
+      <button class="sess-pick" id="ledAgent" type="button" hidden></button>
+      <div class="segs" id="ledStatus"></div>
+      <span class="grow"></span>
+      <input class="sess-filter" id="ledQ" type="search" spellcheck="false" autocomplete="off" placeholder="Search models, providers, sessions" data-tp>
+      <button class="text" id="ledExport" type="button" title="Save every request listed, all pages, as a CSV file in Downloads" data-tt><span data-t>Export CSV</span></button>
+    </div>
+    <p class="led-sum" id="ledSum"></p>
+    <div class="led-wrap" id="ledWrap"></div>
+    <div class="led-pager" id="ledPager" hidden></div>
+    <p class="usage-note" id="ledNote"></p>
+  </div>
+  <div class="usage-pane sess-pane" id="sessionsPane" hidden>
     <div class="sess-tools">
       <div class="segs" id="sessAgent"></div>
       <button class="sess-pick" id="sessModel" type="button" hidden></button>
@@ -121,6 +136,16 @@
     </div>
     <section class="stats" id="sessStats"></section>
     <section class="chart sess-chart" id="sessChart" hidden></section>
+    <div class="sess-grid" id="sessGrid" hidden>
+      <section class="sess-card" id="sessProjects"></section>
+      <section class="sess-card" id="sessModels"></section>
+      <section class="sess-card" id="sessHours"></section>
+      <section class="sess-card" id="sessTop"></section>
+      <section class="sess-card" id="sessShape"></section>
+      <section class="sess-card" id="sessSkills"></section>
+      <section class="sess-card wide" id="sessTools"></section>
+    </div>
+    <div class="row-head" id="sessListHead" hidden><span class="label" data-t>Latest sessions</span></div>
     <div class="list sess-list" id="sessList"></div>
     <p class="usage-note" id="sessNote"></p>
   </div>
@@ -156,6 +181,10 @@
       <div id="quotaLeftSegs"></div>
     </div>
     <div class="row pref">
+      <div class="who"><div class="name" data-t>Currency</div><div class="sub" id="currencySub"></div></div>
+      <div id="currencySegs"></div>
+    </div>
+    <div class="row pref">
       <div class="who"><div class="name" data-t>Open at login</div><div class="sub" data-t>Start magpie in the tray when you log in, so agents find the gateway from the start</div></div>
       <div id="loginSegs"></div>
     </div>
@@ -167,26 +196,39 @@
       <div class="who"><div class="name" data-t>Proxy</div><div class="sub" id="proxySub"></div></div>
       <div id="proxySegs" class="proxy-segs"></div>
     </div>
+  </div>
+  <div class="row-head warm-head"><div class="warm-tabs" id="warmTabs" role="tablist">
+    <button type="button" role="tab" id="warmTab-codex" data-warm="codex" aria-controls="codexWarmList">Codex</button>
+    <button type="button" role="tab" id="warmTab-claude" data-warm="claude" aria-controls="claudeWarmList">Claude Code</button>
+    <button type="button" role="tab" id="warmTab-wb" data-warm="wb" aria-controls="wbList" hidden>WorkBuddy</button>
+  </div></div>
+  <div class="warm-panes">
+  <div class="list prefs" id="codexWarmList" role="tabpanel" aria-labelledby="warmTab-codex">
     <div class="row pref">
-      <div class="who"><div class="name" data-t>Codex warm-up</div><div class="sub" id="warmSub"></div></div>
+      <div class="who"><div class="name" data-t>Warm up on reset</div><div class="sub" id="warmSub"></div></div>
       <div id="warmSegs"></div>
     </div>
     <div class="row pref">
-      <div class="who"><div class="name" data-t>Codex daily warm-up</div><div class="sub" id="warmAtSub"></div></div>
+      <div class="who"><div class="name" data-t>Daily warm-up</div><div class="sub" id="warmAtSub"></div></div>
       <div id="warmAtSegs" class="warm-at"></div>
     </div>
+  </div>
+  <div class="list prefs" id="claudeWarmList" role="tabpanel" aria-labelledby="warmTab-claude">
     <div class="row pref">
-      <div class="who"><div class="name" data-t>Claude Code warm-up</div><div class="sub" id="claudeWarmSub"></div></div>
+      <div class="who"><div class="name" data-t>Warm up on reset</div><div class="sub" id="claudeWarmSub"></div></div>
       <div id="claudeWarmSegs"></div>
     </div>
     <div class="row pref">
-      <div class="who"><div class="name" data-t>Claude Code daily warm-up</div><div class="sub" id="claudeWarmAtSub"></div></div>
+      <div class="who"><div class="name" data-t>Daily warm-up</div><div class="sub" id="claudeWarmAtSub"></div></div>
       <div id="claudeWarmAtSegs" class="warm-at"></div>
     </div>
-    <div class="row pref" id="wbCheckinRow" hidden>
-      <div class="who"><div class="name" data-t>Check in to WorkBuddy daily</div><div class="sub" id="wbCheckinSub"></div></div>
+  </div>
+  <div class="list prefs" id="wbList" role="tabpanel" aria-labelledby="warmTab-wb">
+    <div class="row pref" id="wbCheckinRow">
+      <div class="who"><div class="name" data-t>Daily check-in</div><div class="sub" id="wbCheckinSub"></div></div>
       <div id="wbCheckinSegs"></div>
     </div>
+  </div>
   </div>
   <div class="row-head"><span class="label" data-t>Local network</span></div>
   <div class="list prefs" id="lanList"></div>
@@ -229,6 +271,7 @@
   </div>
 </div>
 
+<script src="compat.js"></script>
 <script src="i18n.js"></script>
 <script src="app.js"></script>
 <script src="routing.js"></script>

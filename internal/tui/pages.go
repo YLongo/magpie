@@ -19,7 +19,9 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	"github.com/yetone/magpie/internal/agent"
+	"github.com/yetone/magpie/internal/fx"
 	"github.com/yetone/magpie/internal/provider"
+	"github.com/yetone/magpie/internal/settings"
 	"github.com/yetone/magpie/internal/usage"
 )
 
@@ -156,7 +158,8 @@ func (m model) updateProviders(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if off {
 			what = "switched off: agents are given none of its models"
 		}
-		return m, saveProvider(p.ID, func(p *provider.Provider) { p.Off = off }, p.Name+" "+what)
+		id := p.ID
+		return m, reseatCmd(func() error { return provider.SetOff(id, off) }, p.Name+" "+what)
 	case "t":
 		m.flash, m.flashOK = "testing "+p.Name+"…", true
 		return m, testCmd(p)
@@ -167,14 +170,25 @@ func (m model) updateProviders(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.confirm = ""
-		return m, func() tea.Msg {
-			if err := provider.Delete(p.ID); err != nil {
-				return flashMsg{text: err.Error()}
-			}
-			return flashMsg{text: "removed " + p.Name, ok: true}
-		}
+		id := p.ID
+		return m, reseatCmd(func() error { return provider.Delete(id) }, "removed "+p.Name)
 	}
 	return m, nil
+}
+
+// reseatCmd makes a change that may take models away from the agents on
+// them, and says which it moved to others (agent.Reseat).
+func reseatCmd(change func() error, done string) tea.Cmd {
+	return func() tea.Msg {
+		moved, err := agent.Reseat(change)
+		if err != nil {
+			return flashMsg{text: err.Error()}
+		}
+		for _, mv := range moved {
+			done += "; moved " + mv.String()
+		}
+		return flashMsg{text: done, ok: true}
+	}
 }
 
 // saveProvider changes one provider and saves it.
@@ -474,19 +488,40 @@ func fmtTokens(n int) string {
 	return fmt.Sprint(n)
 }
 
+// costCurrency is Settings' currency choice and, for cny, the CNY-per-USD
+// rate to show costs at (internal/fx), refreshed at most once a second so
+// a page redrawn on every keypress doesn't reread the settings file or
+// touch the rate's own cache for each row fmtCost renders.
+var (
+	costMu      sync.Mutex
+	costAt      time.Time
+	costCncy    string
+	costRateVal float64
+)
+
+func costCurrency() (string, float64) {
+	costMu.Lock()
+	defer costMu.Unlock()
+	if time.Since(costAt) < time.Second {
+		return costCncy, costRateVal
+	}
+	costCncy = settings.Load().Currency
+	costRateVal = 0
+	if costCncy == "cny" {
+		ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+		costRateVal = fx.Get(ctx).CNYPerUSD
+		cancel()
+	}
+	costAt = time.Now()
+	return costCncy, costRateVal
+}
+
 func fmtCost(t usage.Totals) string {
 	if t.Cost == 0 && t.Unpriced > 0 {
 		return "no price"
 	}
-	var s string
-	switch {
-	case t.Cost >= 100:
-		s = fmt.Sprintf("$%.0f", t.Cost)
-	case t.Cost >= 1:
-		s = fmt.Sprintf("$%.2f", t.Cost)
-	default:
-		s = fmt.Sprintf("$%.3f", t.Cost)
-	}
+	cncy, rate := costCurrency()
+	s := usage.FormatCost(t.Cost, cncy, rate)
 	if t.Unpriced > 0 {
 		s += "+"
 	}

@@ -35,6 +35,9 @@ type Login struct {
 	// Lapsed says the vendor refused to refresh a saved account's sign-in:
 	// it has to be signed in again before it can be used.
 	Lapsed string `json:"lapsed,omitempty"`
+	// Own is the agent's own sign-in, which magpie only reads: removed, it
+	// is hidden rather than deleted (side_logins.go).
+	Own bool `json:"own,omitempty"`
 }
 
 type savedLogin struct {
@@ -63,6 +66,10 @@ type savedLogin struct {
 	// Lapsed why the vendor last refused to (logins_on.go, keepalive.go).
 	Renewed time.Time `json:"renewed,omitzero"`
 	Lapsed  string    `json:"lapsed,omitempty"`
+	// Hidden is the agent's own sign-in removed in magpie, with the mark
+	// of the sign-in it was (side_logins.go): it is listed and tried no
+	// more until the agent signs in anew. The agent's files stay as they are.
+	Hidden string `json:"hidden,omitempty"`
 }
 
 var (
@@ -76,12 +83,16 @@ var loginAgents = []string{"claude", "codex"}
 func loginsPath() string { return filepath.Join(filepath.Dir(Path()), "logins.json") }
 
 func readLogins() []savedLogin {
-	var out []savedLogin
-	b, err := os.ReadFile(loginsPath())
-	if err == nil {
+	// parsed once until the file changes: a state of the page asks for it
+	// dozens of times (every agent's drift and models), and with the
+	// accounts' credentials in it the file is large — a Save of a profile
+	// waited seconds on it
+	ls, _ := filememo.Read("logins", loginsPath(), func(b []byte) ([]savedLogin, error) {
+		var out []savedLogin
 		_ = json.Unmarshal(b, &out)
-	}
-	return dedupeLogins(out)
+		return dedupeLogins(out), nil
+	})
+	return slices.Clone(ls) // callers change theirs
 }
 
 func writeLogins(ls []savedLogin) error {
@@ -465,6 +476,8 @@ func Logins(agent string) []Login {
 		return wbLoginList(wbSiteOf(agent))
 	case CommandCodePlanID:
 		return cmdLoginList()
+	case "qoder":
+		return loginsOf(qoderLogins())
 	case "gemini", "antigravity":
 		return googleLoginList(agent)
 	case "":
@@ -475,6 +488,7 @@ func Logins(agent string) []Login {
 		side = append(side, wbLoginList(wbCN)...)
 		side = append(side, wbLoginList(wbAI)...)
 		side = append(side, cmdLoginList()...)
+		side = append(side, loginsOf(qoderLogins())...)
 		side = append(side, googleLoginList("gemini")...)
 		side = append(side, googleLoginList("antigravity")...)
 	}
@@ -522,6 +536,8 @@ func SwitchLogin(agent, user string) error {
 		return switchWorkBuddyLogin(wbSiteOf(agent), user)
 	case CommandCodePlanID:
 		return switchCommandCodeLogin(user)
+	case "qoder":
+		return switchSideLogin("qoder", user, qoderLogins())
 	case "gemini", "antigravity":
 		return switchGoogleLogin(agent, user)
 	}
@@ -604,6 +620,9 @@ func putClaudeLogin(l savedLogin) error {
 		loc = claudeCredentialLocation{path: filepath.Join(dir, ".credentials.json")}
 		if claudeKeychain {
 			loc = claudeCredentialLocation{keychain: true, account: claudeKeychainAccount()}
+		} else if err := os.MkdirAll(dir, 0o700); err != nil {
+			// Claude Code never run here yet
+			return err
 		}
 	}
 	if err := saveClaudeCredential(loc, c); err != nil {
@@ -651,6 +670,8 @@ func ForgetLogin(agent, user string) error {
 		return forgetWorkBuddyLogin(wbSiteOf(agent), user)
 	case CommandCodePlanID:
 		return forgetCommandCodeLogin(user)
+	case "qoder":
+		return forgetQoderLogin(user)
 	case "gemini", "antigravity":
 		return forgetGoogleLogin(agent, user)
 	}
