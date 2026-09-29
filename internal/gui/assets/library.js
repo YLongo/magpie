@@ -37,6 +37,7 @@
     key: "M10 2.8a3.2 3.2 0 1 0 0 6.4 3.2 3.2 0 0 0 0-6.4z M7.8 8.2 3 13 M4.5 11.5 6 13",
     person: "M8 3a2.5 2.5 0 1 0 0 5 2.5 2.5 0 0 0 0-5z M3.5 13.5c.6-2.4 2.3-3.6 4.5-3.6s3.9 1.2 4.5 3.6",
     back: "m9.5 4.5-3 3.5 3 3.5",
+    plus: "M8 3.5v9 M3.5 8h9",
   };
 
   const tilde = (p) => (lib?.home && p?.startsWith(lib.home) ? "~" + p.slice(lib.home.length) : p || "");
@@ -1235,7 +1236,6 @@
       for (const f of lib.foundSkills) list.append(foundSkillRow(f));
       body.append(list);
     }
-    if (lib.skills.length || lib.projects.length) renderProjects(body);
     const skip = shownAgents().filter((a) => !a.skills);
     if (skip.length) body.append(el("p", "lib-aside", t("{agents} has no skills folder.", { agents: skip.map((a) => a.name).join(", ") })));
     body.append(discover("skills"));
@@ -1637,142 +1637,139 @@
   // library's skills there, as the project's own: linked (or copied) into
   // the folder each agent reads a project's skills from, and kept out of
   // git in the project's .gitignore. Only what magpie placed is taken away.
-  let addingProject = null;       // the folder being added: { dir, error, busy }
-  const openProjects = new Set(); // projects whose skills are shown
+
   const projectAgents = () => shownAgents().filter((a) => a.projectSkills);
 
-  function renderProjects(body) {
-    const rh = el("div", "row-head");
-    rh.append(el("span", "label", t("In projects")), el("span", "grow"));
-    if (!addingProject) rh.append(button(t("Add a project"), "action lib-updall", () => { addingProject = { dir: "" }; render(); }));
-    body.append(rh);
-    if (addingProject) body.append(addProjectCard());
-    if (!lib.projects.length && !addingProject) {
-      body.append(el("p", "lib-aside", t("Give a project's agents some of these skills as the project's own: magpie links them into its .claude/skills and .agents/skills and keeps them out of git.")));
-      return;
-    }
-    for (const p of lib.projects) body.append(projectCard(p));
+
+
+  // A project is one row: its folder, a count of the library's skills it
+  // has, and the three things done to it — copies or links, more skills,
+  // or its removal. Which skills it has is set from each skill's own row.
+
+  // A skill's projects in one number, however many there are: click it to
+  // say which, in a dialog of the projects. Zero shows too — the way in
+  // is always there to find. A placement that couldn't be made warns.
+  function projectCount(s) {
+    const inP = lib.projects.filter((p) => p.skills[s.name]);
+    const problem = lib.projects.some((p) => p.problems?.[s.name]);
+    const b = button("", "lib-projcount" + (problem ? " warn" : ""), () => projectPicker(s));
+    b.append(svg(GLYPH.folder, 12, 1.4), el("span", "n", String(inP.length)));
+    b.title = inP.length
+      ? t("In {projects} — click to change", { projects: inP.map((p) => p.name).join(", ") })
+      : t("In no project — click to give it to some");
+    return b;
   }
 
-  function addProjectCard() {
-    const a = addingProject;
-    const card = el("div", "list lib-card lib-install");
+  // A skill and its projects — and the projects themselves: a row each,
+  // ticked when the skill is in one, one click either way, with what's
+  // done to a project right there too. Adding one is a line at the end.
+  function projectPicker(s) {
+    const ids = () => projectAgents().map((a) => a.id);
+    let adding = false;
+    const ed = el("div", "editor lib-editor");
+    const list = el("div", "lib-picklist");
+    const syncAll = () => {
+      const on = lib.projects.length && lib.projects.every((p) => p.skills[s.name]);
+      allBtn.textContent = on ? t("Select none") : t("Select all");
+    };
+    const draw = () => {
+      const rows = [];
+      for (const p of lib.projects) {
+        const on = !!p.skills[s.name];
+        const problem = p.problems?.[s.name];
+        // a div, not a label: the editor right-aligns its form labels
+        const r = el("div", "lib-pick lib-pickproj" + (problem ? " warn" : ""));
+        const c = el("input");
+        c.type = "checkbox";
+        c.checked = on;
+        c.onchange = async () => {
+          const want = c.checked;
+          const ok = await change("projects/skill", { dir: p.dir, name: s.name, agents: want ? ids() : [] },
+            want ? t("{skill} is in {project}", { skill: s.name, project: p.name }) : t("{skill} is out of {project}", { skill: s.name, project: p.name }));
+          if (!ok) c.checked = !want;
+          draw();
+          syncAll();
+        };
+        r.onclick = (e) => { if (e.target !== c && !e.target.closest("button")) { c.checked = !c.checked; c.onchange(); } };
+        const w = el("span", "who");
+        w.append(el("span", "name", p.name));
+        w.append(el("span", "sub", problem || tilde(p.dir)));
+        const n = Object.keys(p.skills).length;
+        const acts = el("div", "lib-pickacts");
+        acts.append(tag(n === 1 ? t("1 skill") : n ? t("{n} skills", { n }) : t("No skills yet"), n ? "lib-dot" : "lib-unchecked"));
+        const all = projectAgents();
+        const more = button("", "lib-icon", () => addSkillsModal(p, all));
+        more.append(svg(GLYPH.plus, 13, 1.4));
+        more.title = all.length ? t("Pick many of the library's skills for {name} at once", { name: p.name }) : t("No agent shown reads a project's skills folder");
+        more.disabled = !all.length;
+        const rm = button("", "lib-icon danger", () => confirmRemoveProject(p));
+        rm.append(svg(GLYPH.trash, 13, 1.4));
+        rm.title = t("Remove the project");
+        acts.append(more, rm);
+        r.append(c, w, el("span", "grow"), acts);
+        if (problem) w.append(tag(t("Not placed"), "warn", problem));
+        rows.push(r);
+      }
+      if (!lib.projects.length) rows.push(el("div", "list lib-none", t("No projects yet — add one below.")));
+      if (adding) rows.push(addProjectLine(() => { adding = false; draw(); }));
+      allBtn.disabled = !lib.projects.length;
+      list.replaceChildren(...rows);
+    };
+    const allBtn = button(t("Select all"), "", async () => {
+      const off = lib.projects.every((p) => p.skills[s.name]);
+      try {
+        for (const p of lib.projects.filter((x) => off ? x.skills[s.name] : !x.skills[s.name])) {
+          take(await api("library/projects/skill", { dir: p.dir, name: s.name, agents: off ? [] : ids() }));
+        }
+        render();
+        status(off ? t("{skill} is out of every project", { skill: s.name }) : t("{skill} is in every project", { skill: s.name }), "ok");
+      } catch (e) { status(e.message, "err", 6000); }
+      draw();
+      syncAll();
+    });
+    const head = el("div", "ehead");
+    head.append(glyph(GLYPH.skill), el("b", "", t("{skill}'s projects", { skill: s.name })), el("span", "grow"), allBtn);
+    const bar = el("div", "bar");
+    bar.append(button(t("Add a project"), "action", () => { adding = true; draw(); }), el("span", "grow"), button(t("Close"), "", closeLibModal));
+    ed.append(head, list, bar);
+    draw();
+    syncAll();
+    modal = { save: closeLibModal };
+    openLib(ed);
+  }
+
+  // a line to add a project, in the picker: type the folder or choose it
+  function addProjectLine(onAdded) {
+    const box = el("div", "lib-addline");
     const line = el("div", "lib-find");
+    const st = { dir: "", busy: false };
     const inp = el("input");
     inp.type = "text";
-    inp.dataset.lib = "project";
     inp.placeholder = t("The project's folder, like ~/code/app");
     inp.spellcheck = false;
     inp.autocomplete = "off";
-    inp.value = a.dir;
-    inp.oninput = () => { a.dir = inp.value; };
-    inp.onkeydown = (e) => { e.stopPropagation(); if (e.key === "Enter") add(); else if (e.key === "Escape") { addingProject = null; render(); } };
-    line.append(glyph(GLYPH.folder, "lib-mini"), inp);
-    // the app has the system's folder picker; a browser tab only the path
-    if (!web) {
-      line.append(button(t("Choose…"), "", async () => {
-        try {
-          const r = await api("library/projects/choose", {});
-          if (r.dir) { a.dir = r.dir; a.error = ""; render(); }
-        } catch (e) { status(e.message, "err", 6000); }
-      }));
-    }
-    const go = button(a.busy ? t("Adding…") : t("Add"), "action", () => add());
-    go.disabled = !!a.busy;
-    line.append(go, button(t("Cancel"), "", () => { addingProject = null; render(); }));
-    card.append(line);
-    if (a.error) card.append(el("div", "lib-err", a.error));
+    inp.oninput = () => { st.dir = inp.value; };
+    const err = el("div", "lib-err");
     async function add() {
-      const dir = a.dir.trim();
-      if (!dir || a.busy) return;
-      a.busy = true;
-      render();
-      const was = new Set(lib.projects.map((x) => x.dir));
+      const dir = st.dir.trim();
+      if (!dir || st.busy) return;
+      st.busy = true;
       try {
         take(await api("library/projects/add", { dir }));
-        addingProject = null;
-        const p = lib.projects.find((x) => !was.has(x.dir));
-        if (p) openProjects.add(p.dir);
-        status(t("{name} added — pick the skills it gets", { name: p?.name || dir }), "ok");
-      } catch (e) {
-        a.busy = false;
-        a.error = e.message;
-      }
-      render();
+        status(t("{name} added — pick the skills it gets", { name: dir }), "ok");
+        onAdded();
+      } catch (e) { st.busy = false; err.textContent = e.message; }
     }
-    return card;
-  }
-
-  function projectCard(p) {
-    const card = el("div", "list lib-card lib-project" + (p.missing ? " missing" : ""));
-    const isOpen = openProjects.has(p.dir);
-    const head = el("div", "row lib-row click lib-projhead" + (isOpen ? " open" : ""));
-    const who = el("div", "who");
-    const nm = el("div", "name", p.name);
-    if (p.missing) nm.append(tag(t("Folder is gone"), "warn"));
-    else if (p.copy) nm.append(tag(t("Copies"), ""));
-    who.append(nm);
-    const src = el("div", "lib-src");
-    src.append(pathLink(p.dir));
-    who.append(src);
-    const names = Object.keys(p.skills).sort();
-    const pills = el("div", "lib-tags");
-    if (!isOpen) {
-      for (const n of names.slice(0, 4)) pills.append(tag(n, "lib-dot"));
-      if (names.length > 4) pills.append(tag("+" + (names.length - 4), ""));
-      if (!names.length) pills.append(tag(t("No skills yet"), "lib-unchecked"));
+    inp.onkeydown = (e) => { e.stopPropagation(); if (e.key === "Enter") add(); else if (e.key === "Escape") box.remove(); };
+    line.append(glyph(GLYPH.folder, "lib-mini"), inp);
+    if (!web) {
+      line.append(button(t("Choose…"), "", async () => {
+        try { const r = await api("library/projects/choose", {}); if (r.dir) { st.dir = r.dir; inp.value = r.dir; } } catch (e) { status(e.message, "err", 6000); }
+      }));
     }
-    const acts = el("div", "lib-rowacts");
-    const rm = button("", "lib-icon danger", () => confirmRemoveProject(p));
-    rm.append(svg(GLYPH.trash, 13, 1.4));
-    rm.title = t("Remove the project");
-    acts.append(rm);
-    const chev = el("span", "chev");
-    chev.append(svg(CHEV_R, 11, 1.7));
-    head.append(glyph(GLYPH.folder), who, pills, acts, chev);
-    head.onclick = () => { isOpen ? openProjects.delete(p.dir) : openProjects.add(p.dir); render(); };
-    head.title = isOpen ? t("Hide its skills") : t("Pick the skills it gets");
-    card.append(head);
-    if (p.problems?.[""]) card.append(el("div", "lib-err", p.problems[""]));
-    if (!isOpen) return card;
-
-    const opts = el("div", "lib-projopts");
-    const copy = toggle(p.copy, t("Copy files instead of linking"), (on) =>
-      change("projects/copy", { dir: p.dir, copy: on }, on ? t("{name} gets copies now", { name: p.name }) : t("{name} gets links now", { name: p.name })));
-    const lab = el("label", "lib-projcopy");
-    const words = el("span", "", t("Copy files instead of linking"));
-    words.onclick = (e) => { e.preventDefault(); copy.click(); };
-    lab.append(copy, words);
-    opts.append(lab, el("span", "note", p.copy
-      ? t("Copies are made again whenever the library's skill changes; edits made to them are replaced.")
-      : t("Links follow the library's skill: an update reaches the project at once.")));
-    card.append(opts);
-
-    const all = projectAgents();
-    for (const s of lib.skills) {
-      const row = el("div", "row lib-row lib-projskill");
-      const w = el("div", "who");
-      const n = el("div", "name", s.name);
-      const problem = p.problems?.[s.name];
-      if (problem) n.append(tag(t("Not placed"), "warn", problem));
-      w.append(n);
-      const sub = el("div", "sub", problem || s.description || "");
-      sub.title = problem || s.description || "";
-      w.append(sub);
-      const on = p.skills[s.name] || [];
-      // an agent reading the same folder as one that has it has it too
-      const via = (a) => { const o = on.find((id) => agentOf(id)?.projectSkills === a.projectSkills); return o ? nameOf(o) : ""; };
-      row.append(mark(s.icon, GLYPH.skill), w, agentChips(all, on, (next) =>
-        change("projects/skill", { dir: p.dir, name: s.name, agents: next }, next.length
-          ? t("{skill} is in {name} for {agents}", { skill: s.name, name: p.name, agents: next.map(nameOf).join(", ") })
-          : t("{skill} is out of {name}", { skill: s.name, name: p.name })), { via }));
-      card.append(row);
-    }
-    const dirs = [...new Set(all.map((a) => a.projectSkills))];
-    card.append(el("p", "lib-aside lib-projfoot", t("Placed in {dirs} of the project and listed in its .gitignore. A folder there that isn't magpie's is left as it is.", { dirs: dirs.join(", ") })));
-    const skip = shownAgents().filter((a) => a.skills && !a.projectSkills);
-    if (skip.length) card.append(el("p", "lib-aside lib-projfoot", t("{agents} reads no project skills folder magpie knows of.", { agents: skip.map((a) => a.name).join(", ") })));
-    return card;
+    line.append(button(t("Add"), "action", () => add()), button(t("Cancel"), "", () => { box.remove(); }));
+    box.append(line, err);
+    return box;
   }
 
   function confirmRemoveProject(p) {
@@ -1780,11 +1777,149 @@
     const head = el("div", "ehead");
     head.append(glyph(GLYPH.trash), el("b", "", t("Remove {name}?", { name: p.name })));
     ed.append(head);
-    ed.append(el("p", "lib-confirm", t("The skills magpie placed in it are taken away, with their lines in its .gitignore. Nothing else in the folder is touched.")));
+    ed.append(el("p", "lib-confirm", t("The skills magpie placed in it are taken away, and the lines it once put in its .gitignore with them. Nothing else in the folder is touched.")));
     const bar = el("div", "bar");
     const go = button(t("Remove"), "primary danger-fill", async () => {
-      if (await change("projects/remove", { dir: p.dir }, t("{name} removed", { name: p.name }))) { openProjects.delete(p.dir); closeLibModal(); }
+      if (await change("projects/remove", { dir: p.dir }, t("{name} removed", { name: p.name }))) closeLibModal();
     });
+    bar.append(el("span", "grow"), button(t("Cancel"), "", closeLibModal), go);
+    ed.append(bar);
+    modal = { save: () => go.click() };
+    openLib(ed);
+  }
+
+  // the library's shape in a place: a card per source, the skills pass lets
+  // through under its head, each drawn by rowOf — the library's own way of
+  // listing skills, wherever they're listed
+  function drawGrouped(pass, rowOf) {
+    const cards = [];
+    for (const g of skillGroups()) {
+      const skills = g.skills.filter(pass);
+      if (!skills.length) continue;
+      const card = el("div", "list lib-card lib-group");
+      const head = el("div", "row lib-row lib-grouphead");
+      const w = el("div", "who");
+      w.append(el("div", "name" + (g.repo ? " mono" : ""), g.repo || t("On this computer")));
+      const n = skills.length;
+      w.append(el("div", "sub", n === 1 ? t("1 skill") : t("{n} skills", { n })));
+      head.append(g.repo ? mark(skills.find((s) => s.icon)?.icon, GLYPH.skill) : glyph(GLYPH.folder), w);
+      card.append(head);
+      const rows = el("div", "lib-vl");
+      for (const s of skills) rows.append(rowOf(s));
+      card.append(rows);
+      cards.push(card);
+    }
+    return cards;
+  }
+
+  // Many of the library's skills for one project in a move: pick the skills
+  // and the agents they're for. What the project has isn't listed — the
+  // call skips it too, so its own agents stay.
+  function addSkillsModal(p, all) {
+    const have = new Set(Object.keys(p.skills));
+    const pick = new Set();
+    const ed = el("div", "editor lib-editor");
+    // every skill at once, or none: the one click a long list begs for —
+    // the ones the filter leaves in sight, when it's there
+    const freshOnes = () => lib.skills.filter((s) => !have.has(s.name));
+    // what the filter shows, by name or description (empty shows all)
+    let q = "";
+    const matches = (s) => !q || s.name.toLowerCase().includes(q) || (s.description || "").toLowerCase().includes(q);
+    const allBtn = button(t("Select all"), "", () => {
+      const vis = freshOnes().filter(matches);
+      const off = vis.every((s) => pick.has(s.name));
+      for (const s of vis) off ? pick.delete(s.name) : pick.add(s.name);
+      draw();
+      ready();
+    });
+    const head = el("div", "ehead");
+    head.append(glyph(GLYPH.skill), el("b", "", t("Add skills to {name}", { name: p.name })), el("span", "grow"), allBtn);
+    ed.append(head);
+    // the library's own threshold and input, over the modal's cards: with
+    // more than eight skills to pick from, one is found by typing
+    if (freshOnes().length > 8) {
+      const f = el("input", "lib-filter");
+      f.type = "search";
+      f.placeholder = t("Filter {n} skills…", { n: freshOnes().length });
+      f.spellcheck = false;
+      f.autocomplete = "off";
+      f.oninput = () => { q = f.value.trim().toLowerCase(); draw(); };
+      f.onkeydown = (e) => {
+        e.stopPropagation();
+        if (e.key === "Escape" && f.value) { e.preventDefault(); f.value = ""; q = ""; draw(); }
+      };
+      ed.append(f);
+    }
+    const list = el("div", "lib-picklist");
+    ed.append(list);
+    const row = (s) => {
+      // a div, not a label: the editor styles its labels right-aligned and
+      // grey, for the form's own — a row of the library's isn't one
+      const r = el("div", "row lib-row click lib-skill lib-pickrow" + ((s.source || s.origin) ? " src" : ""));
+      const c = el("input");
+      c.type = "checkbox";
+      c.checked = pick.has(s.name);
+      c.onchange = () => { if (c.checked) pick.add(s.name); else pick.delete(s.name); ready(); };
+      r.onclick = (e) => { if (e.target !== c) { c.checked = !c.checked; c.onchange(); } };
+      const w = el("div", "who");
+      w.append(el("div", "name", s.name));
+      const sub = el("div", "sub", s.description || "");
+      sub.title = s.description || "";
+      w.append(sub);
+      if (s.source || s.origin) {
+        const src = el("div", "lib-src");
+        src.append(el("span", "lib-srclink", (s.source || s.origin).replace(/^https:\/\/github\.com\//, "")));
+        w.append(src);
+      }
+      r.append(mark(s.icon, GLYPH.skill), w, c);
+      return r;
+    };
+    // the library's own shape: a card per source, what the project hasn't
+    const draw = () => {
+      const cards = drawGrouped((s) => !have.has(s.name) && matches(s), row);
+      const none = q && !cards.length ? t("No skills match.")
+        : lib.skills.length ? t("Every skill is already in the project.") : t("The library has no skills yet.");
+      list.replaceChildren(...(cards.length ? cards : [el("div", "list lib-none", none)]));
+    };
+    draw();
+    // what happens on Add, said before the click: the skills land in the
+    // project's folders at once — the agents' own chips aren't part of it
+    ed.append(el("div", "lib-modalhint", t("Added skills land in the project's .claude/skills and .agents/skills at once, for every agent that reads them — nothing else to click.")));
+    // how the skills land — linked, or copies made again when the
+    // library's changes — said where the skills are picked. A div, not a
+    // label: the editor right-aligns its form labels.
+    const copyRow = el("div", "lib-modalcopy");
+    const cc = el("input");
+    cc.type = "checkbox";
+    cc.checked = p.copy;
+    const note = el("span", "note", p.copy
+      ? t("Copies are made again whenever the library's skill changes; edits made to them are replaced.")
+      : t("Links follow the library's skill: an update reaches the project at once."));
+    cc.onchange = async () => {
+      const on = cc.checked;
+      const ok = await change("projects/copy", { dir: p.dir, copy: on }, on ? t("{name} gets copies now", { name: p.name }) : t("{name} gets links now", { name: p.name }));
+      if (!ok) cc.checked = !on;
+      else note.textContent = on
+        ? t("Copies are made again whenever the library's skill changes; edits made to them are replaced.")
+        : t("Links follow the library's skill: an update reaches the project at once.");
+    };
+    copyRow.onclick = (e) => { if (e.target !== cc) { cc.checked = !cc.checked; cc.onchange(); } };
+    copyRow.append(cc, el("span", "", t("Copy files instead of linking")), note);
+    ed.append(copyRow);
+    const bar = el("div", "bar");
+    const label = () => (pick.size === 1 ? t("Add 1 skill") : t("Add {n} skills", { n: pick.size }));
+    const go = button(label(), "primary", async () => {
+      go.disabled = true;
+      if (await change("projects/skills", { dir: p.dir, names: [...pick], agents: all.map((a) => a.id) }, pick.size === 1 ? t("Added 1 skill to {name}", { name: p.name }) : t("Added {n} skills to {name}", { n: pick.size, name: p.name }))) closeLibModal();
+      else { go.disabled = false; go.textContent = label(); }
+    });
+    const ready = () => {
+      go.disabled = !pick.size;
+      go.textContent = label();
+      const fresh = freshOnes().filter(matches);
+      allBtn.textContent = fresh.length && fresh.every((s) => pick.has(s.name)) ? t("Select none") : t("Select all");
+    };
+    ready();
     bar.append(el("span", "grow"), button(t("Cancel"), "", closeLibModal), go);
     ed.append(bar);
     modal = { save: () => go.click() };
@@ -2002,7 +2137,7 @@
     rm.append(svg(GLYPH.trash, 13, 1.4));
     rm.title = t("Remove");
     acts.append(rm);
-    row.append(mark(s.icon, GLYPH.skill), who, acts, agentChips(all, s.agents, chipsChange("skills/agents", s.name, "skills", (x) => skillRow(x, all)), { problems: s.problems, via: viaFor(s) }));
+    row.append(mark(s.icon, GLYPH.skill), who, acts, agentChips(all, s.agents, chipsChange("skills/agents", s.name, "skills", (x) => skillRow(x, all)), { problems: s.problems, via: viaFor(s) }), projectCount(s));
     row.onclick = () => viewSkill(s);
     row.title = t("Read {name}'s SKILL.md", { name: s.name });
     return row;

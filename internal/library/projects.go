@@ -29,7 +29,8 @@ type Project struct {
 	// the only ones it ever takes away
 	Placed []string `json:"placed,omitempty"`
 	// Made are the folders magpie made to place them in, taken away again
-	// once they're empty; Gitignore is whether it made the .gitignore
+	// once they're empty; Gitignore is whether it once made the .gitignore
+	// — it writes none now, the flag only remembers its own file to take away
 	Made      []string `json:"made,omitempty"`
 	Gitignore bool     `json:"gitignore,omitempty"`
 }
@@ -134,7 +135,7 @@ func (l *Library) syncProject(p *Project, res *Result) {
 	}
 	sort.Strings(placed)
 	p.Placed = placed
-	if err := p.writeIgnore(); err != nil {
+	if err := p.stripOwnIgnore(); err != nil {
 		fail("", fmt.Errorf(".gitignore: %w", err))
 	}
 	p.tidy()
@@ -226,48 +227,32 @@ func (p *Project) tidy() {
 	p.Made = kept
 }
 
-// writeIgnore keeps the project's .gitignore listing what magpie placed,
-// between its two lines; the rest of the file is the user's and stays.
-// A .gitignore magpie made is taken away once nothing's left in it.
-func (p *Project) writeIgnore() error {
+// stripOwnIgnore takes the lines magpie once put in a project's .gitignore
+// away again, and writes none: whether the folders its skills are placed
+// in are kept out of git is the user's to say, not magpie's.
+func (p *Project) stripOwnIgnore() error {
 	f := filepath.Join(p.Dir, ".gitignore")
 	b, err := os.ReadFile(f)
-	if err != nil && !os.IsNotExist(err) {
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
 		return err
 	}
-	had := err == nil
+	s := strings.ReplaceAll(string(b), "\r\n", "\n")
+	rest := stripIgnore(s)
+	if rest == s {
+		return nil // nothing of magpie's in it
+	}
+	if strings.TrimSpace(rest) == "" && p.Gitignore {
+		p.Gitignore = false
+		return os.Remove(f) // the file was magpie's own, and empty now
+	}
 	nl := "\n"
 	if strings.Contains(string(b), "\r\n") {
 		nl = "\r\n"
 	}
-	rest := stripIgnore(strings.ReplaceAll(string(b), "\r\n", "\n"))
-	out := rest
-	if len(p.Placed) > 0 {
-		if out != "" {
-			out += "\n"
-		}
-		out += ignoreBegin + "\n"
-		for _, e := range p.Placed {
-			out += "/" + e + "\n"
-		}
-		out += ignoreEnd + "\n"
-	}
-	out = strings.ReplaceAll(out, "\n", nl)
-	switch {
-	case out == string(b) && had:
-		return nil
-	case strings.TrimSpace(out) == "":
-		if had && p.Gitignore {
-			p.Gitignore = false
-			return os.Remove(f)
-		}
-		if !had {
-			return nil
-		}
-	case !had:
-		p.Gitignore = true
-	}
-	return edit.WriteAtomic(f, []byte(out))
+	return edit.WriteAtomic(f, []byte(strings.ReplaceAll(rest, "\n", nl)))
 }
 
 // stripIgnore is a .gitignore without magpie's lines, and the blank line
@@ -368,12 +353,9 @@ func ProjectSkill(dir, name string, agents []string) (*Result, error) {
 		if l.skill(name) == nil {
 			return fmt.Errorf("no skill called %s", name)
 		}
-		var ids []string
-		for _, id := range agents {
-			if ProjectSkillsDir(id) == "" {
-				return fmt.Errorf("magpie knows of no folder %s reads a project's skills from", id)
-			}
-			ids = set(ids, id, true)
+		ids, err := projectAgentIDs(agents)
+		if err != nil {
+			return err
 		}
 		if len(ids) == 0 {
 			delete(p.Skills, name)
@@ -383,6 +365,51 @@ func ProjectSkill(dir, name string, agents []string) (*Result, error) {
 			p.Skills = map[string][]string{}
 		}
 		p.Skills[name] = ids
+		return nil
+	})
+}
+
+// projectAgentIDs settles the agents a project's skills go to, made a
+// set; it errors on one magpie knows of no project skills folder for.
+func projectAgentIDs(agents []string) ([]string, error) {
+	var ids []string
+	for _, id := range agents {
+		if ProjectSkillsDir(id) == "" {
+			return nil, fmt.Errorf("magpie knows of no folder %s reads a project's skills from", id)
+		}
+		ids = set(ids, id, true)
+	}
+	return ids, nil
+}
+
+// ProjectSkills gives a batch of the library's skills to a project for
+// the same agents. A skill the project already has is skipped, keeping
+// its own agents, so one call can't clobber what was set skill by skill.
+func ProjectSkills(dir string, names, agents []string) (*Result, error) {
+	return change(func(l *Library) error {
+		p := l.project(dir)
+		if p == nil {
+			return fmt.Errorf("no project %s", dir)
+		}
+		ids, err := projectAgentIDs(agents)
+		if err != nil {
+			return err
+		}
+		if len(ids) == 0 {
+			return fmt.Errorf("no agents chosen")
+		}
+		if p.Skills == nil {
+			p.Skills = map[string][]string{}
+		}
+		for _, name := range names {
+			if l.skill(name) == nil {
+				return fmt.Errorf("no skill called %s", name)
+			}
+			if _, has := p.Skills[name]; has {
+				continue
+			}
+			p.Skills[name] = append([]string{}, ids...)
+		}
 		return nil
 	})
 }

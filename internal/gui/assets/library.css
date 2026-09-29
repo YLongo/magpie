@@ -203,6 +203,11 @@ input.lib-setname:focus { border-color: var(--accent); box-shadow: 0 0 0 3px col
 .lib-filter { height: 26px; margin: 0 4px; padding: 0 9px; border-radius: 7px; border: 1px solid var(--line); background: var(--card); color: var(--fg); font-size: 12px; outline: none; }
 .lib-filter:focus { border-color: var(--accent); }
 .lib-picks { display: flex; flex-direction: column; max-height: 300px; overflow-y: auto; }
+.lib-editor .lib-picklist { grid-column: 1 / -1; }
+.lib-editor .lib-filter { grid-column: 1 / -1; }
+.lib-picklist { display: flex; flex-direction: column; gap: 12px; max-height: 380px; overflow-y: auto; padding-right: 8px; }
+.lib-row.lib-pickrow { cursor: default; }
+.lib-row.lib-pickrow input { flex: none; accent-color: var(--fg); }
 .lib-pick { display: flex; align-items: flex-start; gap: 10px; padding: 7px 6px; border-radius: 8px; cursor: default; }
 .lib-pick:hover:not(.dim) { background: var(--pill); }
 .lib-pick.dim { opacity: .55; }
@@ -328,17 +333,8 @@ input.lib-setname:focus { border-color: var(--accent); box-shadow: 0 0 0 3px col
 .lib-cardhead button.text { height: 22px; font-size: 11.5px; }
 .lib-rtk-cmd { margin: -4px 12px 10px; font: 11.5px var(--code); color: var(--muted); user-select: text; }
 
-/* projects: a card each, its skills shown when it is opened */
-.lib-project { margin-bottom: 8px; }
-.lib-project.missing .lib-projhead .name { color: var(--muted); }
-.lib-projhead .lib-tags { max-width: 45%; overflow: hidden; flex-wrap: nowrap; }
+/* projects: the picker's rows carry a count dot when they have skills */
 .lib-tag.lib-dot::before { content: ""; width: 5px; height: 5px; border-radius: 50%; background: var(--muted); }
-.lib-projopts { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; padding: 8px 12px 8px 49px; border-top: 1px solid var(--line-2); background: var(--card-2); }
-.lib-projopts .note { font-size: 11px; color: var(--faint); line-height: 1.45; min-width: 0; flex: 1 1 220px; }
-.lib-projcopy { display: inline-flex; align-items: center; gap: 8px; font-size: 12px; color: var(--fg-2); cursor: default; }
-.lib-project .lib-projskill { border-top: 1px solid var(--line-2); }
-.lib-projfoot { margin: 0; padding: 8px 12px 10px 49px; border-top: 1px solid var(--line-2); }
-.lib-projfoot + .lib-projfoot { border-top: 0; padding-top: 0; }
 
 /* the library's skills: a card for each GitHub repository they came from,
    and one for those on this computer, folded to its heading line */
@@ -349,8 +345,6 @@ input.lib-setname:focus { border-color: var(--accent); box-shadow: 0 0 0 3px col
 .lib-have .ic.some { opacity: .4; }
 #view-library .row-head .lib-skillq { width: 190px; height: 24px; margin: 0; flex: 0 1 auto; min-width: 90px; }
 .lib-skillq::-webkit-search-cancel-button { -webkit-appearance: none; }
-/* a project's skills out of view are neither laid out nor painted until they near it */
-.lib-projskill { content-visibility: auto; contain-intrinsic-size: auto 76px; }
 .lib-grouphead .lib-rowacts { min-width: 26px; }
 /* A group's skills are drawn near the view first (library.js, windowed),
    room kept for the rest, which are drawn in while nothing else is going
@@ -377,3 +371,17 @@ input.lib-setname:focus { border-color: var(--accent); box-shadow: 0 0 0 3px col
 .lib-subhead .sub { margin: 0; font-size: 11px; color: var(--faint); font-variant-numeric: tabular-nums; }
 .lib-subhead .lib-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--accent); flex: none; }
 .lib-row.lib-subhead:hover { background: color-mix(in srgb, var(--card-2) 70%, var(--pill)); }
+/* a skill's projects as one count: click it to say which, in a dialog */
+.lib-projcount { display: inline-flex; align-items: center; gap: 4px; height: 22px; padding: 0 9px 0 7px; border-radius: 11px; background: var(--pill); color: var(--muted); font-size: 11.5px; font-variant-numeric: tabular-nums; flex: none; }
+.lib-projcount svg { color: var(--faint); }
+.lib-projcount:hover { background: var(--pill-hover); color: var(--fg); }
+.lib-projcount.warn { box-shadow: inset 0 0 0 1px var(--amber); }
+.lib-pick.warn { box-shadow: inset 0 0 0 1px var(--amber); border-radius: 8px; }
+/* a project row in the picker: its folder on the left, what's done to it right */
+.lib-pick.lib-pickproj { align-items: center; }
+.lib-pickproj .who { flex: 1 1 auto; min-width: 0; }
+.lib-pickacts { display: flex; align-items: center; gap: 6px; flex: none; }
+.lib-modalcopy { grid-column: 1 / -1; display: flex; align-items: center; gap: 8px; padding-top: 2px; }
+.lib-modalcopy .note { color: var(--muted); font-size: 11.5px; }
+.lib-modalhint { grid-column: 1 / -1; font-size: 11.5px; color: var(--muted); line-height: 1.5; }
+.lib-addline { display: flex; flex-direction: column; gap: 5px; padding: 8px 6px 2px; }

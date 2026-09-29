@@ -49,7 +49,7 @@ func TestProjectSkillsLinked(t *testing.T) {
 			t.Errorf("%s: %v", e, err)
 		}
 	}
-	want := "node_modules/\n\n" + ignoreBegin + "\n/.agents/skills/pdf\n/.claude/skills/pdf\n" + ignoreEnd + "\n"
+	want := "node_modules/\n" // magpie places its links and leaves the user's .gitignore alone
 	if g := read(t, filepath.Join(proj, ".gitignore")); g != want {
 		t.Errorf(".gitignore:\n%s", g)
 	}
@@ -66,7 +66,7 @@ func TestProjectSkillsLinked(t *testing.T) {
 	ok(t)(ProjectSkill(proj, "pdf", []string{"codex"}))
 	gone(t, filepath.Join(proj, ".claude/skills/pdf"))
 	gone(t, filepath.Join(proj, ".claude")) // magpie made it, and it's empty
-	if g := read(t, filepath.Join(proj, ".gitignore")); strings.Contains(g, ".claude") || !strings.Contains(g, "/.agents/skills/pdf") {
+	if g := read(t, filepath.Join(proj, ".gitignore")); g != "node_modules/\n" {
 		t.Errorf(".gitignore:\n%s", g)
 	}
 
@@ -81,16 +81,22 @@ func TestProjectSkillsLinked(t *testing.T) {
 	}
 }
 
-func TestProjectGitignoreMadeAndTakenAway(t *testing.T) {
+func TestProjectGitignoreLeftToTheUser(t *testing.T) {
 	_, proj := projectLib(t)
 	os.Remove(filepath.Join(proj, ".gitignore"))
 	ok(t)(ProjectSkill(proj, "docx", []string{"claude"}))
-	if g := read(t, filepath.Join(proj, ".gitignore")); g != ignoreBegin+"\n/.claude/skills/docx\n"+ignoreEnd+"\n" {
+	if _, err := os.Stat(filepath.Join(proj, ".gitignore")); !os.IsNotExist(err) {
+		t.Error("magpie made a .gitignore of its own")
+	}
+	if !isLink(t, filepath.Join(proj, ".claude/skills/docx")) { // placed without one
+		t.Error("docx wasn't placed for claude")
+	}
+	// the lines magpie once wrote there it takes away again; none are added
+	write(t, filepath.Join(proj, ".gitignore"), "node_modules/\n\n"+ignoreBegin+"\n/.claude/skills/docx\n"+ignoreEnd+"\n")
+	ok(t)(ProjectSkill(proj, "docx", []string{"codex"}))
+	if g := read(t, filepath.Join(proj, ".gitignore")); g != "node_modules/\n" {
 		t.Errorf(".gitignore: %q", g)
 	}
-	ok(t)(ProjectSkill(proj, "docx", nil))
-	gone(t, filepath.Join(proj, ".gitignore"))
-	gone(t, filepath.Join(proj, ".claude/skills/docx"))
 }
 
 func TestProjectSkillsCopied(t *testing.T) {
@@ -220,5 +226,58 @@ func TestRemoveSkillWhoseFolderIsGone(t *testing.T) {
 	ok(t)(RemoveSkill("pdf"))
 	if v, _ := Read(nil); slices.ContainsFunc(v.Skills, func(s SkillView) bool { return s.Name == "pdf" }) {
 		t.Error("pdf still listed")
+	}
+}
+
+func TestProjectSkillsBatch(t *testing.T) {
+	_, proj := projectLib(t)
+	ok(t)(ProjectSkills(proj, []string{"pdf", "docx"}, []string{"claude", "codex"}))
+	for _, s := range []string{"pdf", "docx"} {
+		for _, e := range []string{".claude/skills/" + s, ".agents/skills/" + s} {
+			p := filepath.Join(proj, e)
+			if !isLink(t, p) || !ours(p, s) {
+				t.Errorf("%s isn't a link to the library's", e)
+			}
+		}
+	}
+	want := "node_modules/\n" // the user's .gitignore stays theirs
+	if g := read(t, filepath.Join(proj, ".gitignore")); g != want {
+		t.Errorf(".gitignore:\n%s", g)
+	}
+	v, _ := Read(nil)
+	sk := v.Projects[0].Skills
+	if !slices.Equal(sk["pdf"], []string{"claude", "codex"}) || !slices.Equal(sk["docx"], []string{"claude", "codex"}) {
+		t.Errorf("projects: %+v", v.Projects)
+	}
+}
+
+func TestProjectSkillsSkipsWhatItHas(t *testing.T) {
+	_, proj := projectLib(t)
+	ok(t)(ProjectSkill(proj, "pdf", []string{"claude"}))
+	ok(t)(ProjectSkills(proj, []string{"pdf", "docx"}, []string{"codex"}))
+	v, _ := Read(nil)
+	sk := v.Projects[0].Skills
+	if !slices.Equal(sk["pdf"], []string{"claude"}) {
+		t.Errorf("pdf's agents changed: %v", sk["pdf"])
+	}
+	if !slices.Equal(sk["docx"], []string{"codex"}) {
+		t.Errorf("docx: %v", sk["docx"])
+	}
+}
+
+func TestProjectSkillsNoAgents(t *testing.T) {
+	_, proj := projectLib(t)
+	if _, err := ProjectSkills(proj, []string{"pdf"}, nil); err == nil || !strings.Contains(err.Error(), "no agents") {
+		t.Errorf("err: %v", err)
+	}
+}
+
+func TestProjectSkillsUnknowns(t *testing.T) {
+	_, proj := projectLib(t)
+	if _, err := ProjectSkills(proj, []string{"pdf"}, []string{"rtk"}); err == nil || !strings.Contains(err.Error(), "rtk") {
+		t.Errorf("agent err: %v", err)
+	}
+	if _, err := ProjectSkills(proj, []string{"nope"}, []string{"claude"}); err == nil || !strings.Contains(err.Error(), "nope") {
+		t.Errorf("skill err: %v", err)
 	}
 }
