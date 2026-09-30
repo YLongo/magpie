@@ -1442,6 +1442,8 @@ const I18N = {
     "Every skill is already in the project.": "库里的技能都已在这个项目中。",
     "Add 1 skill": "添加 1 个技能",
     "Added 1 skill to {name}": "已向 {name} 添加 1 个技能",
+    "Nothing was placed: {list}": "没有技能被放置：{list}",
+    "Added {n} to {name}; {m} not placed: {list}": "已向 {name} 添加 {n} 个，{m} 个未放置：{list}",
     "Add {n} skills": "添加 {n} 个技能",
     "Added {n} skills to {name}": "已向 {name} 添加 {n} 个技能",
     "Pick many of the library's skills for {name} at once": "一次为 {name} 挑选多个库内技能",

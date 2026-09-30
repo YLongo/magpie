@@ -265,6 +265,30 @@ func TestProjectSkillsSkipsWhatItHas(t *testing.T) {
 	}
 }
 
+func TestProjectSkillsPartialFailure(t *testing.T) {
+	_, proj := projectLib(t)
+	// pdf is already there, the project's own: not magpie's to replace;
+	// docx is free to go in. The batch must place docx and report pdf.
+	skill(t, filepath.Join(proj, ".claude/skills/pdf"), "pdf", "The project's own")
+	r, err := ProjectSkills(proj, []string{"pdf", "docx"}, []string{"claude"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(r.Problems) != 1 || r.Problems[0].What != "project:pdf" || !strings.Contains(r.Problems[0].Error, "isn't magpie's") {
+		t.Fatalf("problems: %+v", r.Problems)
+	}
+	if !strings.Contains(read(t, filepath.Join(proj, ".claude/skills/pdf/SKILL.md")), "The project's own") {
+		t.Error("the project's own was overwritten")
+	}
+	if !isLink(t, filepath.Join(proj, ".claude/skills/docx")) {
+		t.Error("docx not placed")
+	}
+	v, _ := Read(nil)
+	if _, has := v.Projects[0].Skills["docx"]; !has {
+		t.Error("docx not recorded")
+	}
+}
+
 func TestProjectSkillsNoAgents(t *testing.T) {
 	_, proj := projectLib(t)
 	if _, err := ProjectSkills(proj, []string{"pdf"}, nil); err == nil || !strings.Contains(err.Error(), "no agents") {

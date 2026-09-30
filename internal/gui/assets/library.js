@@ -1913,8 +1913,30 @@
     const label = () => (pick.size === 1 ? t("Add 1 skill") : t("Add {n} skills", { n: pick.size }));
     const go = button(label(), "primary", async () => {
       go.disabled = true;
-      if (await change("projects/skills", { dir: p.dir, names: [...pick], agents: all.map((a) => a.id) }, pick.size === 1 ? t("Added 1 skill to {name}", { name: p.name }) : t("Added {n} skills to {name}", { n: pick.size, name: p.name }))) closeLibModal();
-      else { go.disabled = false; go.textContent = label(); }
+      try {
+        const v = await api("library/projects/skills", { dir: p.dir, names: [...pick], agents: all.map((a) => a.id) });
+        take(v);
+        render();
+        // what didn't go in, by name — the batch said so, the count of what
+        // did is the rest; three ways it can end, said each its own way
+        const failed = ((v.result || {}).problems || []).map((x) => (x.what || "").replace(/^project:/, "")).filter((n) => pick.has(n));
+        const placed = pick.size - failed.length;
+        if (!failed.length) {
+          status(pick.size === 1 ? t("Added 1 skill to {name}", { name: p.name }) : t("Added {n} skills to {name}", { n: pick.size, name: p.name }), "ok");
+          closeLibModal();
+        } else if (!placed) {
+          status(t("Nothing was placed: {list}", { list: failed.join(", ") }), "err", 8000);
+          go.disabled = false;
+          go.textContent = label();
+        } else {
+          status(t("Added {n} to {name}; {m} not placed: {list}", { n: placed, m: failed.length, name: p.name, list: failed.join(", ") }), "warn", 8000);
+          closeLibModal();
+        }
+      } catch (e) {
+        status(e.message, "err", 6000);
+        go.disabled = false;
+        go.textContent = label();
+      }
     });
     const ready = () => {
       go.disabled = !pick.size;
