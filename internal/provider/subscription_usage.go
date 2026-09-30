@@ -15,6 +15,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/yetone/magpie/internal/netproxy"
 )
 
 // QuotaWindow is one rolling allowance reported by a subscription provider.
@@ -184,8 +186,17 @@ func chosenWindows(ws []QuotaWindow, chosen map[string]bool, base func(string) s
 
 // fetchSubscriptionUsage asks every signed-in vendor at once.
 func fetchSubscriptionUsage() []SubscriptionQuota {
-	ctx, cancel := context.WithTimeout(context.Background(), subscriptionTimeout)
+	ctx0, cancel := context.WithTimeout(context.Background(), subscriptionTimeout)
 	defer cancel()
+	// each account asked through its own proxy, if it has one (#237)
+	proxies := map[string]string{}
+	for _, p := range load().Providers {
+		proxies[p.ID] = p.Proxy
+	}
+	via := func(id string) context.Context { return netproxy.With(ctx0, proxies[id]) }
+	// and one account of several through its own, if it has one (perLogin
+	// and loginQuota ask each so)
+	viaLogin := func(id, user string) context.Context { return ViaLogin(ctx0, id, user) }
 	hidden := map[string]bool{}
 	for _, p := range load().Providers {
 		hidden[p.ID] = p.Hidden || p.Off // switched off: not asked either
@@ -193,24 +204,24 @@ func fetchSubscriptionUsage() []SubscriptionQuota {
 	var fetches []func() SubscriptionQuota
 	if p, ok := claudeAccount(); ok && !hidden["claude"] {
 		if ls := accountsOf("claude"); len(ls) > 1 {
-			fetches = append(fetches, perLogin(ctx, ls, "Claude Code", "claude-color")...)
+			fetches = append(fetches, perLogin(via("claude"), ls, "Claude Code", "claude-color")...)
 		} else {
-			fetches = append(fetches, withUser(p.Account.User, func() SubscriptionQuota { return claudeSubscriptionUsage(ctx) }))
+			fetches = append(fetches, withUser(p.Account.User, func() SubscriptionQuota { return claudeSubscriptionUsage(viaLogin("claude", p.Account.User)) }))
 		}
 	}
 	if user, plan, ok := cursorIdentity(); ok && !hidden["cursor"] {
-		fetches = append(fetches, withUser(user, func() SubscriptionQuota { return cursorSubscriptionUsage(ctx, plan) }))
+		fetches = append(fetches, withUser(user, func() SubscriptionQuota { return cursorSubscriptionUsage(viaLogin("cursor", user), plan) }))
 	}
 	if _, ok := grokAccount(); ok && !hidden["grok"] {
-		fetches = append(fetches, func() SubscriptionQuota { return grokSubscriptionUsage(ctx) })
+		fetches = append(fetches, func() SubscriptionQuota { return grokSubscriptionUsage(via("grok")) })
 	}
 	if home, err := os.UserHomeDir(); err == nil {
 		if p, ok := codexAccount(home); ok && !hidden["codex"] {
 			if ls := accountsOf("codex"); len(ls) > 1 {
-				fetches = append(fetches, perLogin(ctx, ls, "Codex", "codex-color")...)
+				fetches = append(fetches, perLogin(via("codex"), ls, "Codex", "codex-color")...)
 			} else {
 				auth := filepath.Join(home, ".codex", "auth.json")
-				fetches = append(fetches, withUser(p.Account.User, func() SubscriptionQuota { return codexSubscriptionUsage(ctx, auth) }))
+				fetches = append(fetches, withUser(p.Account.User, func() SubscriptionQuota { return codexSubscriptionUsage(viaLogin("codex", p.Account.User), auth) }))
 			}
 		}
 		cfg := os.Getenv("XDG_CONFIG_HOME")
@@ -219,37 +230,49 @@ func fetchSubscriptionUsage() []SubscriptionQuota {
 		}
 		if app, ok := copilotLogin(cfg); ok && !hidden["copilot"] {
 			if ls := copilotLoginList(); len(ls) > 1 {
-				fetches = append(fetches, perLogin(ctx, ls, "Copilot", "githubcopilot")...)
+				fetches = append(fetches, perLogin(via("copilot"), ls, "Copilot", "githubcopilot")...)
 			} else {
-				fetches = append(fetches, withUser(app.User, func() SubscriptionQuota { return copilotSubscriptionUsage(ctx, app.Token) }))
+				fetches = append(fetches, withUser(app.User, func() SubscriptionQuota { return copilotSubscriptionUsage(viaLogin("copilot", app.User), app.Token) }))
 			}
 		}
 	}
 	if key := kiroKey(); key != "" && !hidden["kiro"] {
-		fetches = append(fetches, func() SubscriptionQuota { return kiroQuotaAt(ctx, key, "") })
+		fetches = append(fetches, func() SubscriptionQuota { return kiroQuotaAt(via("kiro"), key, "") })
 	} else if !hidden["kiro"] {
-		fetches = append(fetches, perLogin(ctx, kiroLoginList(), "Kiro", "kiro-color")...)
+		fetches = append(fetches, perLogin(via("kiro"), kiroLoginList(), "Kiro", "kiro-color")...)
 	}
 	if !hidden["zcode"] {
-		fetches = append(fetches, perLogin(ctx, zcodeLoginList(), "ZCode", "zcode")...)
+		fetches = append(fetches, perLogin(via("zcode"), zcodeLoginList(), "ZCode", "zcode")...)
 	}
 	for _, w := range []*wbSite{wbCN, wbAI} {
 		if !hidden[w.id] {
-			fetches = append(fetches, perLogin(ctx, wbLoginList(w), w.name, "workbuddy-color")...)
+			fetches = append(fetches, perLogin(via(w.id), wbLoginList(w), w.name, "workbuddy-color")...)
 		}
 	}
 	if !hidden[CommandCodePlanID] {
-		fetches = append(fetches, perLogin(ctx, cmdLoginList(), "Command Code", "commandcode")...)
+		fetches = append(fetches, perLogin(via(CommandCodePlanID), cmdLoginList(), "Command Code", "commandcode")...)
 	}
 	if !hidden["qoder"] {
-		fetches = append(fetches, perLogin(ctx, loginsOf(qoderLogins()), "Qoder", "qoder")...)
+		fetches = append(fetches, perLogin(via("qoder"), loginsOf(qoderLogins()), "Qoder", "qoder")...)
+	}
+	if !hidden["dimagent"] {
+		fetches = append(fetches, perLogin(via("dimagent"), dimagentLoginList(), "DimAgent", "dimagent")...)
+	}
+	if !hidden["zed"] {
+		fetches = append(fetches, perLogin(via("zed"), zedLoginList(), "Zed", "zed")...)
+	}
+	if !hidden["factory"] {
+		fetches = append(fetches, perLogin(via("factory"), factoryLoginList(), "Factory", "factory")...)
+	}
+	if !hidden[MiMoID] {
+		fetches = append(fetches, perLogin(via(MiMoID), mimoLoginList(), "Xiaomi MiMo", "mimocode")...)
 	}
 	for _, agent := range []string{"gemini", "antigravity"} {
 		if hidden[agent] {
 			continue
 		}
 		for _, l := range googleLogins(agent) {
-			fetches = append(fetches, func() SubscriptionQuota { return l.acct.quota(ctx, l.Plan) })
+			fetches = append(fetches, func() SubscriptionQuota { return l.acct.quota(viaLogin(agent, l.User), l.Plan) })
 		}
 	}
 	out := make([]SubscriptionQuota, len(fetches))

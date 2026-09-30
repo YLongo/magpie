@@ -57,6 +57,9 @@ func (s *Server) codexBackend(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "magpie speaks HTTP", http.StatusUpgradeRequired)
 		return
 	}
+	// the pool's accounts and their model lists say they are this Codex, or
+	// newer: the backend serves a model only to a client that knows it
+	provider.SawCodexClient(r.Header)
 	rest := strings.TrimPrefix(r.URL.Path, CodexPath)
 	body, err := codexBody(r)
 	if err != nil {
@@ -242,7 +245,7 @@ func (s *Server) codexUpstream(w http.ResponseWriter, r *http.Request, rest stri
 	}
 	var res *http.Response
 	for tries := 0; ; tries++ {
-		req, err := http.NewRequestWithContext(r.Context(), r.Method, u, bytes.NewReader(body))
+		req, err := http.NewRequestWithContext(provider.ViaSignedIn(r.Context(), "codex"), r.Method, u, bytes.NewReader(body))
 		if err != nil {
 			writeError(w, provider.Responses, 502, err.Error())
 			end(502, err.Error(), 0, 0)
@@ -482,7 +485,7 @@ func (s *Server) codexModels(w http.ResponseWriter, r *http.Request) {
 	if r.URL.RawQuery != "" {
 		u += "?" + r.URL.RawQuery
 	}
-	if req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, u, nil); err == nil {
+	if req, err := http.NewRequestWithContext(provider.ViaSignedIn(r.Context(), "codex"), http.MethodGet, u, nil); err == nil {
 		copyHeaders(req.Header, r.Header)
 		req.Header.Del("Accept-Encoding")
 		if res, err := s.client.Do(req); err == nil {
@@ -521,9 +524,21 @@ func (s *Server) codexModels(w http.ResponseWriter, r *http.Request) {
 		}
 		own = kept
 	}
+	// and the ones taken out of Codex's list on the Agents page
+	if off := provider.CodexNativeHidden(); len(off) > 0 {
+		kept := own[:0]
+		for _, m := range own {
+			o, _ := m.(map[string]any)
+			if slug, _ := o["slug"].(string); off[slug] {
+				continue
+			}
+			kept = append(kept, m)
+		}
+		own = kept
+	}
 	ms := provider.CodexListed()
 	// the list is the backend's and magpie's, and so is its ETag
-	w.Header().Set("ETag", codexcat.WithTag(etag, codexcat.Tag(ms)))
+	w.Header().Set("ETag", codexcat.WithTag(etag, provider.CodexListTag()))
 	writeJSON(w, 200, map[string]any{"models": append(own, codexcat.Entries(ms, len(own)+100)...)})
 }
 
@@ -532,7 +547,7 @@ func (s *Server) codexModels(w http.ResponseWriter, r *http.Request) {
 // change to either has Codex ask for the list again.
 func modelsEtag(h http.Header) {
 	if v := h.Get("X-Models-Etag"); v != "" {
-		h.Set("X-Models-Etag", codexcat.WithTag(v, codexcat.Tag(provider.CodexListed())))
+		h.Set("X-Models-Etag", codexcat.WithTag(v, provider.CodexListTag()))
 	}
 }
 

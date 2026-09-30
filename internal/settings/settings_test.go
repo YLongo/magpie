@@ -39,6 +39,30 @@ func TestRoundTrip(t *testing.T) {
 	if Save(Settings{Currency: "eur"}) == nil {
 		t.Fatal("bad currency accepted")
 	}
+	if Load().SessionTerminal != "" {
+		t.Fatal("the system handler should be the default")
+	}
+	if err := Save(Settings{SessionTerminal: "com.mitchellh.ghostty"}); err != nil || Load().SessionTerminal != "com.mitchellh.ghostty" {
+		t.Fatalf("session terminal not kept: %v", err)
+	}
+	if err := Save(Settings{SessionTerminal: "system"}); err != nil || Load().SessionTerminal != "system" {
+		t.Fatalf("system terminal not kept: %v", err)
+	}
+	if Save(Settings{SessionTerminal: "Ghostty; rm -rf /"}) == nil {
+		t.Fatal("bad terminal app id accepted")
+	}
+	// the text size is 100% until one of the sizes is chosen
+	if Save(Settings{}) != nil || Load().TextSize != 100 {
+		t.Fatalf("default text size: %+v", Load())
+	}
+	if Save(Settings{TextSize: 125}) != nil || Load().TextSize != 125 {
+		t.Fatal("text size not kept")
+	}
+	for _, bad := range []int{90, 120, 300, -1} {
+		if Save(Settings{TextSize: bad}) == nil {
+			t.Fatalf("text size %d accepted", bad)
+		}
+	}
 	if filepath.Base(Path()) != "settings.json" {
 		t.Fatal(Path())
 	}

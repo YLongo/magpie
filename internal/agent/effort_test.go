@@ -18,6 +18,7 @@ func effortHome(t *testing.T) string {
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
 	t.Setenv("XDG_CACHE_HOME", filepath.Join(home, ".cache"))
 	t.Setenv("HERMES_HOME", "")
+	t.Setenv("MIMOCODE_HOME", "")
 	t.Setenv("HANA_HOME", "")
 	t.Setenv("DSH_HOME", "")
 	if err := provider.Save(provider.Provider{ID: "deepseek", Name: "DeepSeek", Chat: "https://api.deepseek.com/v1", Key: "k", Models: []string{"pro", "flash"}}); err != nil {
@@ -164,8 +165,15 @@ func TestDshEffort(t *testing.T) {
 	if err := f.Set("max"); err != nil {
 		t.Fatal(err)
 	}
-	if err := f.Set("low"); err == nil {
-		t.Fatal("took low")
+	// llm-deepseek takes low as well (#269), and nothing between
+	if err := f.Set("low"); err != nil || f.Get() != "low" {
+		t.Fatalf("low: %v, effort %q\n%s", err, f.Get(), readFile(patch))
+	}
+	if err := f.Set("medium"); err == nil {
+		t.Fatal("took medium")
+	}
+	if err := f.Set("max"); err != nil {
+		t.Fatal(err)
 	}
 	// kept when the model changes and when the catalog is synced
 	if err := a.Field("model").Set("magpie/deepseek/flash"); err != nil {

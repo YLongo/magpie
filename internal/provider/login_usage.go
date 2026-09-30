@@ -46,6 +46,14 @@ func LoginUsage(ctx context.Context, agent string) map[string]SubscriptionQuota 
 		logins = cmdLoginList()
 	case "qoder":
 		logins = loginsOf(qoderLogins())
+	case "dimagent":
+		logins = dimagentLoginList()
+	case "zed":
+		logins = zedLoginList()
+	case "factory":
+		logins = factoryLoginList()
+	case MiMoID:
+		logins = mimoLoginList()
 	case "gemini", "antigravity":
 		logins = googleLoginList(agent)
 	case "cursor": // one account, the one cursor-agent is signed in to
@@ -93,8 +101,21 @@ func LoginUsage(ctx context.Context, agent string) map[string]SubscriptionQuota 
 }
 
 func loginQuota(ctx context.Context, l Login) SubscriptionQuota {
+	ctx = ViaLogin(ctx, l.Agent, l.User) // asked through the account's own proxy
 	if l.Agent == "qoder" {
 		return qoderLoginQuota(ctx, l)
+	}
+	if l.Agent == "dimagent" {
+		return dimagentLoginQuota(ctx, l)
+	}
+	if l.Agent == "zed" {
+		return zedLoginQuota(ctx, l)
+	}
+	if l.Agent == "factory" {
+		return factoryLoginQuota(ctx, l)
+	}
+	if l.Agent == MiMoID {
+		return mimoLoginQuota(ctx, l)
 	}
 	if l.Agent == "cursor" {
 		return cursorSubscriptionUsage(ctx, l.Plan)

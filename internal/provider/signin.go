@@ -47,11 +47,12 @@ var signInTimeout = 10 * time.Minute
 
 // SignInState is where a sign-in stands, for the window to show.
 type SignInState struct {
-	ID    string `json:"id"`
-	Agent string `json:"agent"`
-	URL   string `json:"url"`            // the vendor's page, to open or copy
-	Code  string `json:"code,omitempty"` // what to type there, for a device code
-	State string `json:"state"`          // installing, waiting, done, failed or canceled
+	ID            string `json:"id"`
+	Agent         string `json:"agent"`
+	URL           string `json:"url"`                     // the vendor's page, to open or copy
+	Code          string `json:"code,omitempty"`          // what to type there, for a device code
+	State         string `json:"state"`                   // installing, waiting, done, failed or canceled
+	PasteCallback bool   `json:"pasteCallback,omitempty"` // a callback URL can also finish this sign-in
 	// Installing is the CLI being installed before the sign-in can start
 	Installing string `json:"installing,omitempty"`
 	User       string `json:"user,omitempty"`  // the account, once done
@@ -61,15 +62,18 @@ type SignInState struct {
 }
 
 type signInFlow struct {
-	mu       sync.Mutex
-	st       SignInState
-	verifier string
-	state    string
-	redirect string
-	srv      *http.Server
-	stop     func() // ends an agent's own login command, when that is the sign-in
-	kiro     *kiroFlow
-	done     chan struct{}
+	mu                sync.Mutex
+	st                SignInState
+	verifier          string
+	state             string
+	redirect          string
+	srv               *http.Server
+	stop              func() // ends an agent's own login command, when that is the sign-in
+	kiro              *kiroFlow
+	dimagentDone      chan dimagentCallback
+	dimagentSubmitted bool
+	site              string // where to sign in, for an agent with more than one (ZCode: "zai" or "bigmodel")
+	done              chan struct{}
 }
 
 var signIns = struct {
@@ -89,7 +93,15 @@ func randomToken(n int) string {
 // An agent signed in with a CLI that isn't installed has it installed first:
 // the sign-in is then "installing", and gets its URL when that is done.
 func StartSignIn(agent string) (SignInState, error) {
-	s := &signInFlow{verifier: randomToken(48), state: randomToken(24), done: make(chan struct{})}
+	// "zcode:bigmodel" is ZCode signed in on BigModel (智谱)
+	agent, site, _ := strings.Cut(agent, ":")
+	return StartSignInAt(agent, site)
+}
+
+// StartSignInAt is StartSignIn on one of the sites an agent signs in on:
+// ZCode's "zai" (the default) or "bigmodel".
+func StartSignInAt(agent, site string) (SignInState, error) {
+	s := &signInFlow{verifier: randomToken(48), state: randomToken(24), done: make(chan struct{}), site: site}
 	s.st = SignInState{ID: randomToken(9), Agent: agent, State: "waiting"}
 	cli, install := missingCLI(agent)
 	var installing context.Context
@@ -254,9 +266,30 @@ func (s *signInFlow) begin() error {
 		if err := startQoderSignIn(s); err != nil {
 			return err
 		}
+	case "dimagent":
+		// DimAgent's OAuth + PKCE, on the callback port its client registered
+		if err := startDimAgentSignIn(s); err != nil {
+			return err
+		}
+	case "zed":
+		// Zed's own sign-in: zed.dev sends the browser back to a port magpie
+		// listens on, with the account's token encrypted to magpie's key
+		if err := startZedSignIn(s); err != nil {
+			return err
+		}
+	case "factory":
+		// WorkOS's device code, as droid signs in to Factory
+		if err := startFactorySignIn(s); err != nil {
+			return err
+		}
+	case MiMoID:
+		// Xiaomi's long-poll sign-in, for the MiMo server's service
+		if err := startMiMoSignIn(s); err != nil {
+			return err
+		}
 	case "zcode":
-		// Z.ai's sign-in, as ZCode makes it
-		if err := startZCodeSignIn(s); err != nil {
+		// Z.ai's or BigModel's sign-in, as ZCode makes it
+		if err := startZCodeSignIn(s, s.site); err != nil {
 			return err
 		}
 	case "gemini", "antigravity":
@@ -320,6 +353,22 @@ func CancelSignIn(id string) {
 	if ok {
 		s.finish(SignInState{State: "canceled"})
 	}
+}
+
+// SubmitSignInCallback finishes a browser sign-in whose callback could not
+// reach this machine. Invalid input leaves the pending sign-in open to retry.
+func SubmitSignInCallback(id, raw string) error {
+	signIns.Lock()
+	s, ok := signIns.m[id]
+	signIns.Unlock()
+	if !ok {
+		return errors.New("no such sign-in")
+	}
+	got, err := dimAgentCallbackFromPaste(raw)
+	if err != nil {
+		return err
+	}
+	return s.submitDimAgentCallback(got)
 }
 
 // WaitSignIn blocks until a sign-in is over, for the command line.

@@ -10,8 +10,10 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
+	"github.com/yetone/magpie/internal/edit"
 	"github.com/yetone/magpie/internal/proc"
 	"github.com/yetone/magpie/internal/provider"
 )
@@ -134,10 +136,38 @@ func (a *Agent) Detected() bool {
 }
 
 // goProgram reports whether bin was built by Go: another tool of the same
-// name, not the agent, when the agent is not written in Go.
+// name, not the agent, when the agent is not written in Go. Reading a
+// binary's build info parses its whole symbol table (~150ms for a large
+// one), and detection runs on every state the window asks for, so the
+// answer is kept while the file is the same.
 func goProgram(bin string) bool {
-	_, err := buildinfo.ReadFile(bin)
+	st, err := os.Stat(bin)
+	if err != nil {
+		return false
+	}
+	key := goProgramKey{bin, st.Size(), st.ModTime()}
+	goPrograms.Lock()
+	defer goPrograms.Unlock()
+	if v, ok := goPrograms.m[key]; ok {
+		return v
+	}
+	_, err = buildinfo.ReadFile(bin)
+	if goPrograms.m == nil {
+		goPrograms.m = map[goProgramKey]bool{}
+	}
+	goPrograms.m[key] = err == nil
 	return err == nil
+}
+
+type goProgramKey struct {
+	path string
+	size int64
+	mod  time.Time
+}
+
+var goPrograms struct {
+	sync.Mutex
+	m map[goProgramKey]bool
 }
 
 // Field looks a field up by key.
@@ -245,4 +275,22 @@ func (a *Agent) Spell(key, v string) (string, error) {
 		return "", fmt.Errorf("%s isn't a model in magpie's catalog (magpie models lists them)", ref)
 	}
 	return v, nil
+}
+
+// atomic makes each of an agent's field sets, and its Sync, one edit of the
+// files at paths: one that fails part way puts them all back as they were,
+// rather than leaving, say, Codex's config.toml with magpie's provider table
+// written but its model not (#253).
+func atomic(a *Agent, paths ...string) *Agent {
+	for i := range a.Fields {
+		if set := a.Fields[i].Set; set != nil {
+			a.Fields[i].Set = func(v string) error {
+				return edit.Atomically(func() error { return set(v) }, paths...)
+			}
+		}
+	}
+	if sync := a.Sync; sync != nil {
+		a.Sync = func() error { return edit.Atomically(sync, paths...) }
+	}
+	return a
 }

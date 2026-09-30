@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"time"
@@ -25,6 +26,9 @@ type Settings struct {
 	Theme string `json:"theme,omitempty"` // system | light | dark
 	Lang  string `json:"lang,omitempty"`  // system | en | zh
 	Tray  string `json:"tray,omitempty"`  // what clicking the tray icon opens: panel | window
+	// SessionTerminal is the Mac app that opens a resumed session, by bundle
+	// id. "" and "system" follow the .command file association.
+	SessionTerminal string `json:"sessionTerminal,omitempty"`
 	// Currency is what a cost — the Usage page's, the tray panel's, the
 	// TUI's and the CLI's — is shown converted to: usd (its native
 	// currency, list prices being in dollars) or cny, at a live exchange
@@ -98,6 +102,10 @@ type Settings struct {
 	// QuotaLeft shows a subscription's windows by how much of each is left,
 	// not used: the Usage page, the tray panel and the menu bar alike.
 	QuotaLeft bool `json:"quotaLeft,omitempty"`
+	// TextSize is how large the window's and the tray panel's pages are
+	// drawn, in percent (one of TextSizes): the webviews' own zoom, as a
+	// browser's, so the text and everything around it grow together.
+	TextSize int `json:"textSize,omitempty"`
 	// How the agents are listed, by agent id. AgentOrder comes first, as
 	// ordered; an agent it doesn't name (one installed since) follows in
 	// magpie's own order. A hidden agent is folded away at the bottom of the
@@ -110,6 +118,10 @@ type Settings struct {
 	// families (the tag a provider or group is given), provider ids and
 	// group ids its lists hold. An agent it doesn't name is shown them all.
 	Visible map[string][]string `json:"visible,omitempty"`
+	// HiddenModels are the catalog entries (their ids, "<provider>/<model>"
+	// or a group's) taken out of an agent's lists one by one, by agent id,
+	// after Visible: a model not named here, a new one among them, is shown.
+	HiddenModels map[string][]string `json:"hiddenModels,omitempty"`
 	// ModelNames are the names the user gave models, by "<provider
 	// id>/<model id>": agents, the gateway's model list and magpie itself
 	// show them for the vendor's (see provider.SetModelName).
@@ -118,6 +130,9 @@ type Settings struct {
 	// by "<provider id>/<model id>": the lists magpie hands out offer only
 	// those (see provider.SetModelEfforts).
 	ModelEfforts map[string][]string `json:"modelEfforts,omitempty"`
+	// ModelImages is whether the user said a model takes images, by
+	// "<provider id>/<model id>". Absent leaves it to the vendor's list.
+	ModelImages map[string]bool `json:"modelImages,omitempty"`
 	// The main window's size when it was last resized, width and height,
 	// so it opens at it again after a restart.
 	Window []int `json:"window,omitempty"`
@@ -167,7 +182,12 @@ var (
 	Warmups = []string{"", "week", "all"}
 	// TrayEvery are TrayUsageEvery's values, in minutes.
 	TrayEvery = []int{1, 3, 5, 10, 30}
+	// TextSizes are TextSize's values, in percent. None is under 100: the
+	// webviews' zoom on Windows and Linux (Wails' SetZoom) goes no lower.
+	TextSizes = []int{100, 110, 125, 150}
 )
+
+var validTerminalBundleID = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9.-]{0,254}$`)
 
 // Path is the settings file.
 func Path() string {
@@ -190,6 +210,26 @@ func Load() Settings {
 	return s.normal()
 }
 
+// CheckProxy says whether p is a proxy setting magpie takes: "" (follow),
+// "direct", or an http://, https:// or socks5:// address (host:port
+// meaning http). The global Proxy and a provider's own are both checked
+// with it.
+func CheckProxy(p string) error {
+	p = strings.TrimSpace(p)
+	if p == "" || p == "direct" {
+		return nil
+	}
+	raw := p
+	if !strings.Contains(raw, "://") {
+		raw = "http://" + raw
+	}
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" || !slices.Contains([]string{"http", "https", "socks5", "socks5h"}, u.Scheme) {
+		return fmt.Errorf("proxy must look like http://127.0.0.1:7890 or socks5://127.0.0.1:1080, not %q", p)
+	}
+	return nil
+}
+
 // Save validates and writes the settings.
 func Save(s Settings) error {
 	s = s.normal()
@@ -201,6 +241,9 @@ func Save(s Settings) error {
 	}
 	if !slices.Contains(Trays, s.Tray) {
 		return fmt.Errorf("tray must be one of %v, not %q", Trays, s.Tray)
+	}
+	if s.SessionTerminal != "" && s.SessionTerminal != "system" && !validTerminalBundleID.MatchString(s.SessionTerminal) {
+		return fmt.Errorf("session terminal must be an app bundle id or system, not %q", s.SessionTerminal)
 	}
 	if !slices.Contains(Currencies, s.Currency) {
 		return fmt.Errorf("currency must be one of %v, not %q", Currencies, s.Currency)
@@ -219,16 +262,12 @@ func Save(s Settings) error {
 	if !slices.Contains(TrayEvery, s.TrayUsageEvery) {
 		return fmt.Errorf("the menu bar's usage is refreshed every %v minutes, not %d", TrayEvery, s.TrayUsageEvery)
 	}
+	if !slices.Contains(TextSizes, s.TextSize) {
+		return fmt.Errorf("text size must be one of %v percent, not %d", TextSizes, s.TextSize)
+	}
 	s.Proxy = strings.TrimSpace(s.Proxy)
-	if s.Proxy != "" && s.Proxy != "direct" {
-		raw := s.Proxy
-		if !strings.Contains(raw, "://") {
-			raw = "http://" + raw
-		}
-		u, err := url.Parse(raw)
-		if err != nil || u.Host == "" || !slices.Contains([]string{"http", "https", "socks5", "socks5h"}, u.Scheme) {
-			return fmt.Errorf("proxy must look like http://127.0.0.1:7890 or socks5://127.0.0.1:1080, not %q", s.Proxy)
-		}
+	if err := CheckProxy(s.Proxy); err != nil {
+		return err
 	}
 	s.Vision = strings.TrimSpace(s.Vision)
 	if s.Vision != "" && s.Vision != "off" && !strings.Contains(s.Vision, "/") {
@@ -275,6 +314,9 @@ func (s Settings) normal() Settings {
 	}
 	if s.TrayUsageEvery == 0 {
 		s.TrayUsageEvery = 3
+	}
+	if s.TextSize == 0 {
+		s.TextSize = 100
 	}
 	// a time of day as 06:00 whichever way it came (6:00, 06:00:00)
 	for _, at := range []*string{&s.CodexWarmAt, &s.ClaudeWarmAt} {

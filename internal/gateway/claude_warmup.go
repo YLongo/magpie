@@ -10,7 +10,18 @@ import (
 
 	"github.com/yetone/magpie/internal/netproxy"
 	"github.com/yetone/magpie/internal/proc"
+	"github.com/yetone/magpie/internal/provider"
 )
+
+// claudeProxy is the proxy a Claude Code run on an account's behalf goes
+// through: the one ctx names (the account's own, or its subscription's),
+// else the subscription's.
+func claudeProxy(ctx context.Context) string {
+	if c := netproxy.Choice(ctx); c != "" {
+		return c
+	}
+	return provider.ProxyOf("claude")
+}
 
 // warmClaude sends a Claude account one "hi" through Claude Code, as the
 // bridge runs it (claudeCLIArgs): none of its tools, settings or MCP
@@ -30,7 +41,7 @@ func warmClaude(ctx context.Context, oauth string) error {
 	cmd := proc.CommandContext(ctx, binary, claudeWarmArgs()...)
 	cmd.Dir = tmp
 	cmd.Stdin = strings.NewReader("hi")
-	cmd.Env = netproxy.Env(cleanClaudeEnv(os.Environ()))
+	cmd.Env = netproxy.EnvWith(claudeProxy(ctx), cleanClaudeEnv(os.Environ()))
 	if oauth != "" {
 		cmd.Env = append(cmd.Env, "CLAUDE_CODE_OAUTH_TOKEN="+oauth)
 	}

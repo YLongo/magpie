@@ -132,6 +132,9 @@ const (
 	// failVerify: the account must be verified with its vendor (Google's
 	// VALIDATION_REQUIRED) before it is served again
 	failVerify = "verify"
+	// failRefused: the vendor's safety filter refused the request before
+	// anything was said (#248) — the next one is asked, and nobody rests
+	failRefused = "refused"
 )
 
 // failure says why a reply failed.
@@ -364,7 +367,17 @@ func keepRetry(dst, src http.Header, body []byte) {
 			dst.Set("Retry-After", strconv.Itoa(int(d.Seconds())))
 		}
 	}
+	if note, ok := policyRefusal(body); ok {
+		// the error the agent gets keeps the vendor's words but not its
+		// code (bio_policy): that it was the safety filter goes on beside
+		// it, for settle to try the next account (#248)
+		dst.Set(refusedHeader, note)
+	}
 }
+
+// refusedHeader carries, from keepRetry to settle, that an error status
+// was the safety filter refusing the request, and what it said.
+const refusedHeader = "X-Magpie-Refused"
 
 // resetsHeader carries, from keepRetry to restAfter, when a subscription
 // out of quota said it's back. A held error that is passed on after all

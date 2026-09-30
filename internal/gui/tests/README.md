@@ -1,5 +1,11 @@
 # Dropdown browser regression
 
+`session-terminal.test.cjs` checks the macOS Settings choice for installed
+`.command` handlers in English and Chinese. The system default appears once
+and is selected at first. It selects Ghostty, changes the theme, then returns
+to the system default, reloading to verify both saved choices.
+The API is faked and no terminal app is launched.
+
 `menu-scroll.test.cjs` loads the real HTML, CSS and JavaScript with isolated API
 fixtures. It checks session folder/model filters and the main model picker in
 Chromium and WebKit, including wheel, scrollbar track/thumb, keyboard selection
@@ -13,11 +19,26 @@ shared helper; a control under what it unrolls (`data-unrolls`) going down
 with it; a click that asks to go somewhere with `scrollOnPurpose(e)`;
 the room kept at the foot going as the reader scrolls back; and the wheel.
 
+`signin-callback.test.cjs` checks DimAgent's pasted callback in a narrow Chinese
+dark window: invalid input remains editable, retry reaches the callback route,
+and a pending or accepted submission cannot be submitted twice.
+
 `panel-fold.test.cjs` expands and collapses on the Agents page with the list
 scrolled to its end, in the tray panel (one agent open) and in the window:
 "Show {n} more" unrolls the rest under the button, the view going down with
 them and never back up; "Show less", and a row opened and closed, leave what
 was clicked where it is on every frame.
+
+`agent-models.test.cjs` opens Codex's model list from the line under its
+name, in Chromium and WebKit, English and Chinese: the line reads "Showing 8 /
+31 models" under the name, opening it moves nothing and puts it on the screen
+whole, routing groups come first and OpenRouter's 24 start folded, the model
+Codex is set to can't be taken out, a click takes one out at once with the
+whole list sent and the count under the name following, a search opens a
+folded group, "Shown" keeps one just turned off till the view changes, a
+group's "Show all" comes on hover, "Hide all" at the foot sends every one
+but the model in use, "Show all" there sends none, and Esc or a
+click elsewhere closes it.
 
 `gateway-fold.test.cjs` folds Connect on the Gateway page with the view
 scrolled: its fields hide, the head keeps the base URL and a copy button, the
@@ -27,6 +48,12 @@ head stays where it was, and the fold is remembered across a reload.
 a title, memories, a turn on Luna Reserve, a kind it does not know yet): each
 has a grey tag by its model in the Requests list, in English and Chinese, the
 model keeping its room first, and the request's story says what it was.
+
+`routing-effort-row.test.cjs` lists live requests sent at high reasoning, one
+under way, one with two tries, in Chromium and WebKit, English and Chinese, at
+1440, 1000 and 480px: in every row the "· high" is shown whole and no run of
+text is drawn over another (#273: in two columns of ~470px it sat on the time
+taken).
 
 `routing-served.test.cjs` lists a request whose vendor's reply names another
 model than the one asked for (gpt-6-sol served as gpt-6-luna), one answered
@@ -88,6 +115,18 @@ cny (#212): the Usage page's total converts, the row's tooltip carries the
 rate, picking it with the settings list scrolled well down moves nothing,
 and the choice survives a reload — in English and Chinese.
 
+`text-size.test.cjs` checks the Settings page's Text size row (100, 110,
+125 and 150%): a pick posts to /api/settings/text-size without scrolling
+the page, stays picked after a reload (boot.js carries it, and the page's
+`--zoom` has it before the first paint), and a save of the other settings
+leaves it be; Ctrl/Cmd + = and − step through the sizes and 0 goes back to
+100%, in the window and the tray panel, the other modifier doing nothing.
+The zoom is the webview's, so here it is as a browser zooms: the smallest
+window at 150% (840×630 points) is 560×420 CSS pixels at a device scale of
+1.5, and no view (nor the panel at 150%) runs off to the side, the Mac
+header still 50 points tall for the traffic lights. English and Chinese,
+light and dark; ARTIFACT_DIR gets screenshots at 100% and 150%.
+
 `settings-groups.test.cjs` puts the Settings page's warm-ups and check-in
 under a tab per service (#124): Codex, Claude Code and WorkBuddy tabs where a
 heading would be, after Preferences, before Local network, Codex's picked to
@@ -115,8 +154,8 @@ what it is; rows with no border, no second line and no overflow, three to a
 line at 900px; an added provider not faded but marked by a small green dot
 after its name, a grey count only past one account (the Claude subscription's
 2); short names with the full name, plans and host in the title; a vendor's
-global and China presets one row marked "Global · China", its editor picking
-the region with the key typed kept; the custom provider a line at the foot,
+global and China presets one row with no tag, the regions' hosts in its
+title, its editor picking the region with the key typed kept; the custom provider a line at the foot,
 gone while searching; the dialog growing out of the row clicked on a spring
 and folding back into it on close; in English and Chinese.
 
@@ -140,6 +179,14 @@ only with an `@supports not (…)` fallback in the same file. Then, in WebKit
 with those built-ins deleted, the panel's tabs and the window's pages are
 drawn with no page error. It cannot run an old engine, so syntax is judged
 by the parse, not by running it.
+
+`add-button.test.cjs` keeps the Providers page's "Add provider" at the
+view's foot over a long list, at the top and at the end alike; one click
+with the list scrolled to its end opens the sheet and takes the view down to
+it (in WebKit too); the button steps aside while the sheet's head is in
+sight and, scrolled back up, takes the view to the sheet again; and a dialog
+opened and closed over the page keeps every logo it drew rather than making
+them afresh; in English and Chinese.
 
 `usage-ledger.test.cjs` opens the Usage page's Requests, a row per request
 from a faked `/api/usage/requests`: the columns, the model asked for, the
@@ -165,16 +212,39 @@ autonomy (remembered, the page left where it was), tool use (the top tools,
 their kinds and weeks) and the top skills with their last use, agents and
 projects.
 
+`shared-skills.test.cjs` opens the Library's Skills tab with skills found in
+the user-wide `~/.agents/skills` (#227): one row for a skill there that
+agents link or junction to, "shared in ~/.agents/skills/…" with those
+agents' icons and no "differs in"; a link in the shared folder also saying
+where it points; a copy of an agent's own still "differs in ZCode"; Bring in
+saying it stays where it is and posting the name; in English and Chinese.
+
+`model-pick.test.cjs` picks Claude Code's model with the Agents page
+scrolled while a faked `/api/set` takes 2.5s to answer: the row shows the
+new model at once, in the window and in the tray panel's opened row and its
+line, the page left where it was; the answer keeps it and says so; a refused
+pick puts the old model back with the reason; in English and Chinese.
+
+`omarchy.test.cjs` holds Omarchy's look to Omarchy: with no Omarchy theme in
+boot.js the page has no omarchy class or theme style, shows the Appearance
+choices and no Bar icon row, and asks nothing of /api/omarchy; with one, the
+theme's background, square corners and its name in place of the choices, and
+Settings → Bar icon, whose On and Off each post and move nothing, hidden when
+the app says Omarchy's bar isn't there; in English and Chinese.
+
 With Node.js and Playwright available:
 
 ```sh
-node --test internal/gui/tests/menu-scroll.test.cjs internal/gui/tests/click-scroll.test.cjs internal/gui/tests/panel-fold.test.cjs internal/gui/tests/panel-routing.test.cjs internal/gui/tests/gateway-fold.test.cjs internal/gui/tests/routing-kind.test.cjs internal/gui/tests/balance-fix.test.cjs internal/gui/tests/cli-update.test.cjs internal/gui/tests/login-import.test.cjs internal/gui/tests/agy-launch.test.cjs internal/gui/tests/currency.test.cjs internal/gui/tests/usage-ledger.test.cjs internal/gui/tests/update-check.test.cjs internal/gui/tests/routing-steady.test.cjs internal/gui/tests/old-webkit.test.cjs
+node --test internal/gui/tests/menu-scroll.test.cjs internal/gui/tests/click-scroll.test.cjs internal/gui/tests/panel-fold.test.cjs internal/gui/tests/panel-routing.test.cjs internal/gui/tests/gateway-fold.test.cjs internal/gui/tests/routing-kind.test.cjs internal/gui/tests/balance-fix.test.cjs internal/gui/tests/cli-update.test.cjs internal/gui/tests/login-import.test.cjs internal/gui/tests/agy-launch.test.cjs internal/gui/tests/currency.test.cjs internal/gui/tests/usage-ledger.test.cjs internal/gui/tests/update-check.test.cjs internal/gui/tests/omarchy.test.cjs node --test internal/gui/tests/signin-callback.test.cjs internal/gui/tests/routing-steady.test.cjs internal/gui/tests/old-webkit.test.cjs internal/gui/tests/session-terminal.test.cjs internal/gui/tests/text-size.test.cjs internal/gui/tests/zcode-site.test.cjs
 ```
 
 If Playwright is installed outside the repository, set `NODE_PATH` to the
 directory containing its package. The suite uses Playwright's Chromium and
 WebKit binaries (`playwright install chromium webkit`). No frontend dependency
 is needed by the app itself. Tested with Playwright 1.63.0.
+
+For the callback test, `PLAYWRIGHT_CHANNEL=chrome` uses an installed Chrome
+instead of Playwright's Chromium.
 
 Set `BROWSER=chromium` or `BROWSER=webkit` for one engine. Set `ARTIFACT_DIR` to
 an external directory to retain screenshots and Playwright traces, including

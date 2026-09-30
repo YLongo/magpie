@@ -18,6 +18,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -113,8 +114,14 @@ func perKey(p provider.Provider, model string, from provider.Protocol) []candida
 // after them, in the order they suit it.
 func perKeyOf(p provider.Provider, model string, from provider.Protocol) (out, aside, left []candidate) {
 	if p.Account != nil {
-		all := []candidate{{p: p, model: model, rest: p.ID}}
-		for _, q := range p.AlsoOn() {
+		also := p.AlsoOn()
+		var all []candidate
+		// the account the agent is signed in to, unless the user paused
+		// it for the others on (#263)
+		if len(also) == 0 || !p.OwnPaused() {
+			all = append(all, candidate{p: p, model: model, rest: p.ID})
+		}
+		for _, q := range also {
 			all = append(all, candidate{p: q, model: model, rest: p.ID + "@" + q.Account.User})
 		}
 		// an account whose plan lacks the model (a Free one behind a Plus)
@@ -379,6 +386,21 @@ func restLast(out []candidate, pl planned) ([]candidate, planned) {
 	return append(ready, resting...), pl
 }
 
+// spentAfter says whether every candidate in cs rests with its allowance
+// run out: none of them is likely to answer.
+func spentAfter(cs []candidate) bool {
+	for _, c := range cs {
+		r, ok := restOf(c.restKey())
+		if !ok && c.restID() != c.restKey() {
+			r, ok = restOf(c.restID())
+		}
+		if !ok || r.Why != failQuota && r.Why != failCredit {
+			return false
+		}
+	}
+	return len(cs) > 0
+}
+
 var restingUntil = struct {
 	sync.Mutex
 	m    map[string]time.Time
@@ -411,6 +433,12 @@ var quotaWords = regexp.MustCompile(`(?i)quota|insufficient|balance|credit|billi
 // key, or this way — words another provider, or key, may not answer with.
 var unservedWords = regexp.MustCompile(`(?i)model.{0,80}(not (supported|accessible|available|found|enabled|allowed)|unsupported|does ?n[o']t exist|unknown|invalid)|(no such|unknown|invalid|unsupported) model|model_not_found|模型.{0,12}(不存在|不支持|无权|未开通)`)
 
+// refusedWords are how a vendor says it won't take requests from this
+// client at all — WorkBuddy's "Illegal API invocation from an unapproved
+// channel" to a chat opening with another agent's own system prompt — a
+// refusal of the provider, not of the request, another member may serve.
+var refusedWords = regexp.MustCompile(`(?i)unapproved channel|illegal api invocation`)
+
 // retryable says whether another provider may do better with a request
 // that failed this way: the vendor was busy, out of quota or failing, or
 // this key or provider can't serve it — not the request itself at fault.
@@ -419,7 +447,7 @@ func retryable(status int, body []byte) bool {
 	case status == 401, status == 402, status == 403, status == 404, status == 408, status == 429, status >= 500:
 		return true
 	case status == 400, status == 422:
-		return quotaWords.Match(body) || unservedWords.Match(body)
+		return quotaWords.Match(body) || unservedWords.Match(body) || refusedWords.Match(body)
 	}
 	return false
 }
@@ -459,7 +487,9 @@ func passing(status int, header http.Header, again int) (time.Duration, bool) {
 // answer: headers and body wait until release, or are dropped for the next
 // try. Anything else goes straight through — but for a stream, only once
 // its first content comes: an error before that is a failure another may
-// answer, as an error status is.
+// answer, as an error status is. So is a safety refusal with nothing said
+// before it (#248), and a reply that isn't streamed is held whole to read
+// for one.
 type holdWriter struct {
 	w       http.ResponseWriter
 	hold    bool
@@ -474,6 +504,12 @@ type holdWriter struct {
 	failure    int       // the status the stream's error stands for
 	failMsg    string
 	sharedPool bool // an OpenRouter upstream pool rejected this attempt
+
+	// refused: the vendor's safety filter ended the reply before any of it
+	// was said — Anthropic's stop_reason "refusal", OpenAI's content_filter
+	// — which another account or model may answer (#248)
+	refused bool
+	whole   bool // a reply that isn't streamed, held whole until release
 
 	ended bool   // the stream's last event was written: the reply is whole
 	tail  []byte // the end of the last write, for a marker split across two
@@ -499,13 +535,18 @@ func (h *holdWriter) WriteHeader(code int) {
 		h.stream, h.since = true, time.Now()
 		return
 	}
+	if h.hold && strings.HasPrefix(h.header.Get("Content-Type"), "application/json") {
+		// read whole for a refusal once the try is over (settle)
+		h.whole = true
+		return
+	}
 	h.pass()
 }
 
 func (h *holdWriter) pass() {
 	dst := h.w.Header()
 	for k, v := range h.header {
-		if k != resetsHeader { // magpie's own note, for restAfter
+		if k != resetsHeader && k != refusedHeader { // magpie's own notes, for restAfter and settle
 			dst[k] = v
 		}
 	}
@@ -576,6 +617,9 @@ func (h *holdWriter) scan() {
 		case eventError:
 			h.failure, h.failMsg = status, msg
 			return
+		case eventRefusal:
+			h.failure, h.failMsg, h.refused = status, msg, true
+			return
 		}
 		h.flow()
 		return
@@ -616,8 +660,36 @@ func (h *holdWriter) errBody() []byte {
 	return h.held.Bytes()
 }
 
+// settle reads a reply held, once the try is over, for a refusal with
+// nothing said: a reply held whole, or an error status that is one.
+func (h *holdWriter) settle() {
+	if h.passing || h.failure != 0 {
+		return
+	}
+	if h.status >= 400 {
+		// an error status saying the safety filter refused it: OpenAI's
+		// 400 bio_policy, which Codex was handed with the next account
+		// never asked (#248)
+		if msg := h.header.Get(refusedHeader); msg != "" {
+			h.failure, h.failMsg, h.refused = refusedStatus, msg, true
+		} else if msg, ok := policyRefusal(h.held.Bytes()); ok {
+			h.failure, h.failMsg, h.refused = refusedStatus, msg, true
+		}
+		return
+	}
+	if !h.whole {
+		return
+	}
+	if msg, ok := refusedReply(h.held.Bytes()); ok {
+		h.failure, h.failMsg, h.refused = refusedStatus, msg, true
+	}
+}
+
 // failed reports a held error another provider could answer instead.
 func (h *holdWriter) failed() bool {
+	if h.refused {
+		return !h.passing
+	}
 	return !h.passing && h.code() >= 400 && retryable(h.code(), h.errBody())
 }
 
@@ -651,7 +723,83 @@ const (
 	eventContent = iota
 	eventLead    // what comes before a reply's content: a start, a ping
 	eventError
+	eventRefusal // the reply's end, by the vendor's safety filter
 )
+
+// refusedStatus is what a refusal with nothing said is answered as: a
+// request the agent is told not to send again as it is, rather than a
+// reply that looks whole but empty, which Codex asks for again and again,
+// each time paying for the prompt (#248).
+const refusedStatus = http.StatusBadRequest
+
+// filterReasons are how a vendor says its safety filter stopped the reply:
+// Anthropic's stop_reason, OpenAI's finish_reason and incomplete reason,
+// an OpenAI or Azure error's code, and Gemini's finishReason and
+// blockReason.
+var filterReasons = map[string]string{
+	"refusal":                  "refusal",
+	"content_filter":           "content_filter",
+	"content_policy_violation": "content_filter",
+	"SAFETY":                   "safety",
+	"PROHIBITED_CONTENT":       "safety",
+	"BLOCKLIST":                "safety",
+	"SPII":                     "safety",
+	"IMAGE_SAFETY":             "safety",
+}
+
+// refusedNote is what a refusal is noted as: the vendor's own reason.
+func refusedNote(reason string) string {
+	return "safety filter: " + reason
+}
+
+// streamPart is what one event of a reply carries of its content, in any
+// protocol, to tell a reply begun from its empty frame (#248).
+type streamPart struct {
+	Type  string `json:"type"`
+	Text  string `json:"text"`
+	Think string `json:"thinking"`
+	// a Responses item's
+	Content []struct {
+		Text    string `json:"text"`
+		Refusal string `json:"refusal"`
+	} `json:"content"`
+	Summary []struct {
+		Text string `json:"text"`
+	} `json:"summary"`
+}
+
+// said tells whether a part says anything an agent would show or act on:
+// text, reasoning, a call. What isn't known is taken as saying something.
+func (p streamPart) said() bool {
+	switch p.Type {
+	case "text", "output_text", "summary_text", "reasoning_text":
+		return p.Text != ""
+	case "thinking":
+		return p.Think != ""
+	case "redacted_thinking":
+		return false
+	case "message":
+		for _, c := range p.Content {
+			if c.Text != "" || c.Refusal != "" {
+				return true
+			}
+		}
+		return false
+	case "reasoning":
+		for _, c := range p.Summary {
+			if c.Text != "" {
+				return true
+			}
+		}
+		for _, c := range p.Content {
+			if c.Text != "" {
+				return true
+			}
+		}
+		return false
+	}
+	return true
+}
 
 // streamEvent says what one server-sent event of a reply is, in any of the
 // protocols an agent speaks: the start of a reply, its content, or an
@@ -676,12 +824,32 @@ func streamEvent(ev []byte) (kind, status int, msg string) {
 		Error    json.RawMessage `json:"error"`
 		Message  json.RawMessage `json:"message"` // a Responses error's; an Anthropic start's is the message
 		Response struct {
-			Error json.RawMessage `json:"error"`
+			Error             json.RawMessage `json:"error"`
+			Status            string          `json:"status"`
+			IncompleteDetails *struct {
+				Reason string `json:"reason"`
+			} `json:"incomplete_details"`
 		} `json:"response"`
 		Choices *[]struct {
 			Delta        map[string]any `json:"delta"`
 			FinishReason *string        `json:"finish_reason"`
 		} `json:"choices"`
+		// Anthropic's: a text delta's, or message_delta's stop_reason;
+		// Responses': a string of text
+		Delta        json.RawMessage `json:"delta"`
+		ContentBlock streamPart      `json:"content_block"`
+		Item         streamPart      `json:"item"`
+		Part         streamPart      `json:"part"`
+		Text         *string         `json:"text"`
+		Candidates   *[]struct {
+			Content struct {
+				Parts []json.RawMessage `json:"parts"`
+			} `json:"content"`
+			FinishReason string `json:"finishReason"`
+		} `json:"candidates"`
+		PromptFeedback struct {
+			BlockReason string `json:"blockReason"`
+		} `json:"promptFeedback"`
 	}
 	if json.Unmarshal(data, &v) != nil {
 		return eventContent, 0, "" // [DONE], or what isn't ours to read
@@ -698,14 +866,83 @@ func streamEvent(ev []byte) (kind, status int, msg string) {
 		}
 		return eventError, streamStatus(msg), msg
 	}
+	refusal := func(reason string) (int, int, string) {
+		return eventRefusal, refusedStatus, refusedNote(reason)
+	}
 	switch {
 	case typ == "error" || typ == "response.failed":
+		raw := v.Error
 		if len(v.Response.Error) > 0 && string(v.Response.Error) != "null" {
-			return errOf(v.Response.Error)
+			raw = v.Response.Error
+		}
+		if len(raw) == 0 || string(raw) == "null" {
+			// Responses' own error event: its code and message on it
+			if note, ok := policyRefusal(data); ok {
+				return eventRefusal, refusedStatus, note
+			}
+		}
+		if note, ok := policyRefusal(raw); ok {
+			return eventRefusal, refusedStatus, note
+		}
+		return errOf(raw)
+	case len(v.Error) > 0 && string(v.Error) != "null":
+		if note, ok := policyRefusal(v.Error); ok {
+			return eventRefusal, refusedStatus, note
 		}
 		return errOf(v.Error)
-	case len(v.Error) > 0 && string(v.Error) != "null":
-		return errOf(v.Error)
+	// what only frames a reply, before anything is said in it — held with
+	// its start, so a refusal after it can still go to another
+	case typ == "content_block_start" && !v.ContentBlock.said(),
+		typ == "content_block_stop",
+		typ == "content_block_delta" && !anthropicDeltaSays(v.Delta),
+		typ == "response.output_item.added" && !v.Item.said(),
+		typ == "response.output_item.done" && !v.Item.said(),
+		typ == "response.content_part.added" && !v.Part.said(),
+		typ == "response.content_part.done" && !v.Part.said(),
+		typ == "response.reasoning_summary_part.added" && !v.Part.said(),
+		typ == "response.reasoning_summary_part.done" && !v.Part.said(),
+		(typ == "response.output_text.delta" || typ == "response.reasoning_summary_text.delta" || typ == "response.reasoning_text.delta") && string(v.Delta) == `""`,
+		(typ == "response.output_text.done" || typ == "response.reasoning_summary_text.done" || typ == "response.reasoning_text.done") && v.Text != nil && *v.Text == "":
+		return eventLead, 0, ""
+	case typ == "message_delta":
+		var d struct {
+			StopReason string `json:"stop_reason"`
+		}
+		if json.Unmarshal(v.Delta, &d) == nil && d.StopReason == "refusal" {
+			return refusal(d.StopReason)
+		}
+	case typ == "response.incomplete" || typ == "response.completed" && v.Response.Status == "incomplete":
+		if d := v.Response.IncompleteDetails; d != nil {
+			if r, ok := filterReasons[d.Reason]; ok {
+				return refusal(r)
+			}
+		}
+	case typ == "" && v.Candidates != nil:
+		// a Gemini chunk
+		if r, ok := filterReasons[v.PromptFeedback.BlockReason]; ok {
+			return refusal(r)
+		}
+		for _, c := range *v.Candidates {
+			for _, p := range c.Content.Parts {
+				var part struct {
+					Text string `json:"text"`
+				}
+				if json.Unmarshal(p, &part) != nil || part.Text != "" || !bytes.Contains(p, []byte(`"text"`)) {
+					return eventContent, 0, "" // text, or a call
+				}
+			}
+			if r, ok := filterReasons[c.FinishReason]; ok {
+				return refusal(r)
+			}
+			if c.FinishReason != "" {
+				return eventContent, 0, ""
+			}
+		}
+		return eventLead, 0, ""
+	case typ == "" && len(v.PromptFeedback.BlockReason) > 0:
+		if r, ok := filterReasons[v.PromptFeedback.BlockReason]; ok {
+			return refusal(r)
+		}
 	case typ == "ping", typ == "message_start", typ == "response.created", typ == "response.in_progress", typ == "response.queued":
 		return eventLead, 0, ""
 	case strings.HasPrefix(typ, "codex."):
@@ -717,18 +954,179 @@ func streamEvent(ev []byte) (kind, status int, msg string) {
 	case typ == "" && v.Choices != nil:
 		// a Chat chunk: the first says only who speaks
 		for _, c := range *v.Choices {
-			if c.FinishReason != nil {
-				return eventContent, 0, ""
-			}
 			for k, x := range c.Delta {
 				if k != "role" && x != nil && x != "" {
 					return eventContent, 0, ""
 				}
 			}
+			if c.FinishReason != nil {
+				if r, ok := filterReasons[*c.FinishReason]; ok {
+					return refusal(r)
+				}
+				return eventContent, 0, ""
+			}
 		}
 		return eventLead, 0, ""
 	}
 	return eventContent, 0, ""
+}
+
+// anthropicDeltaSays tells whether an Anthropic content_block_delta says
+// anything: text or reasoning, or a call's input. A signature doesn't.
+func anthropicDeltaSays(raw json.RawMessage) bool {
+	var d struct {
+		Type     string `json:"type"`
+		Text     string `json:"text"`
+		Thinking string `json:"thinking"`
+	}
+	if json.Unmarshal(raw, &d) != nil {
+		return true
+	}
+	switch d.Type {
+	case "text_delta":
+		return d.Text != ""
+	case "thinking_delta":
+		return d.Thinking != ""
+	case "signature_delta":
+		return false
+	}
+	return true
+}
+
+// errorCode is an error's code, or its type when it has none.
+func errorCode(raw json.RawMessage) string {
+	var e struct {
+		Code any    `json:"code"`
+		Type string `json:"type"`
+	}
+	if json.Unmarshal(raw, &e) != nil {
+		return ""
+	}
+	if c, ok := e.Code.(string); ok && c != "" {
+		return c
+	}
+	return e.Type
+}
+
+// policyCode is an error code that names the vendor's usage policy:
+// OpenAI's bio_policy ("This content was flagged for possible biological
+// risk"), cyber_policy and the like (#248).
+var policyCode = regexp.MustCompile(`^[a-z]+_policy$`)
+
+// flaggedWords are how OpenAI's invalid_prompt says the prompt was held to
+// its usage policy, rather than malformed.
+var flaggedWords = regexp.MustCompile(`(?i)flagged|usage polic`)
+
+// policyRefusal tells whether an error — an error object, a body holding
+// one, or a stream's error event — is the vendor's safety filter refusing
+// the request: Azure's content_filter, OpenAI's content_policy_violation,
+// bio_policy and invalid_prompt flagged as against its usage policy. It is
+// not the request at fault, as another 400 is: another account or model
+// may answer it (#248).
+func policyRefusal(raw []byte) (string, bool) {
+	var e struct {
+		Code    any    `json:"code"`
+		Type    string `json:"type"`
+		Message string `json:"message"`
+		Error   *struct {
+			Code    any    `json:"code"`
+			Type    string `json:"type"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if json.Unmarshal(raw, &e) != nil {
+		return "", false
+	}
+	code, typ, msg := e.Code, e.Type, e.Message
+	if e.Error != nil {
+		code, typ, msg = e.Error.Code, e.Error.Type, e.Error.Message
+	}
+	c, _ := code.(string)
+	if c == "" {
+		c = typ
+	}
+	note := func(reason string) (string, bool) {
+		if msg = strings.TrimSpace(msg); msg != "" {
+			if len(msg) > 300 {
+				msg = msg[:300] + "…"
+			}
+			return refusedNote(reason) + " — " + msg, true
+		}
+		return refusedNote(reason), true
+	}
+	switch r, ok := filterReasons[c]; {
+	case ok:
+		return note(r)
+	case policyCode.MatchString(c):
+		return note(c)
+	case c == "invalid_prompt" && flaggedWords.MatchString(msg):
+		return note(c)
+	}
+	return "", false
+}
+
+// refusedReply tells whether a whole reply, not streamed, is the vendor's
+// safety filter refusing with nothing said: Anthropic's stop_reason
+// "refusal", Chat's finish_reason "content_filter", Responses' incomplete
+// for content_filter, Gemini's SAFETY — with no text or call in it.
+func refusedReply(b []byte) (string, bool) {
+	var v struct {
+		// Anthropic's
+		StopReason string       `json:"stop_reason"`
+		Content    []streamPart `json:"content"`
+		// Chat's
+		Choices []struct {
+			FinishReason string `json:"finish_reason"`
+			Message      struct {
+				Content   any   `json:"content"`
+				ToolCalls []any `json:"tool_calls"`
+			} `json:"message"`
+		} `json:"choices"`
+		// Responses'
+		Status            string `json:"status"`
+		IncompleteDetails *struct {
+			Reason string `json:"reason"`
+		} `json:"incomplete_details"`
+		Output []streamPart `json:"output"`
+		// Gemini's
+		Candidates []struct {
+			Content struct {
+				Parts []json.RawMessage `json:"parts"`
+			} `json:"content"`
+			FinishReason string `json:"finishReason"`
+		} `json:"candidates"`
+		PromptFeedback struct {
+			BlockReason string `json:"blockReason"`
+		} `json:"promptFeedback"`
+	}
+	if json.Unmarshal(b, &v) != nil {
+		return "", false
+	}
+	none := func(ps []streamPart) bool {
+		return !slices.ContainsFunc(ps, streamPart.said)
+	}
+	if r, ok := filterReasons[v.StopReason]; ok && r == "refusal" && none(v.Content) {
+		return refusedNote(r), true
+	}
+	for _, c := range v.Choices {
+		if r, ok := filterReasons[c.FinishReason]; ok && (c.Message.Content == nil || c.Message.Content == "") && len(c.Message.ToolCalls) == 0 {
+			return refusedNote(r), true
+		}
+	}
+	if d := v.IncompleteDetails; v.Status == "incomplete" && d != nil && none(v.Output) {
+		if r, ok := filterReasons[d.Reason]; ok {
+			return refusedNote(r), true
+		}
+	}
+	if r, ok := filterReasons[v.PromptFeedback.BlockReason]; ok {
+		return refusedNote(r), true
+	}
+	for _, c := range v.Candidates {
+		if r, ok := filterReasons[c.FinishReason]; ok && len(c.Content.Parts) == 0 {
+			return refusedNote(r), true
+		}
+	}
+	return "", false
 }
 
 // streamStatus is the status an error in a stream stands for, as a vendor

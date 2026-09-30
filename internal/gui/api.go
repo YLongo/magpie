@@ -56,6 +56,12 @@ type Windows interface {
 	// keeps up with the panel's size; false when it can't, for the page to
 	// go on painting it itself.
 	TintPanel(rgba [4]uint8, ms int) bool
+	// TintTitleBar paints the window's title bar the page's colour, where
+	// the system draws one (Windows); false where there is none to paint.
+	TintTitleBar(rgba [4]uint8, dark bool) bool
+	// SetTextSize zooms the window's and the panel's pages to percent
+	// (settings.TextSizes), the panel's size with them.
+	SetTextSize(percent int)
 }
 
 type fieldJSON struct {
@@ -80,6 +86,9 @@ type agentJSON struct {
 	// Launch: the command that starts an agent taking the gateway only
 	// from its environment (agy) on magpie, to copy
 	Launch string `json:"launch,omitempty"`
+	// Models: how many of the catalog its lists show, for an agent that
+	// picks among it (agent_models.go)
+	Models *modelCountJSON `json:"models,omitempty"`
 }
 
 // clientJSON is an agent, or another client the gateway knows, as a
@@ -148,6 +157,9 @@ type settingsJSON struct {
 	Version string `json:"version"`
 	Dir     string `json:"dir"`     // where magpie keeps its files, as shown
 	Gateway string `json:"gateway"` // the local endpoint
+	// Mac apps that explicitly handle .command files, for resumed sessions.
+	TerminalApps    []terminalChoice `json:"terminalApps,omitempty"`
+	TerminalDefault string           `json:"terminalDefault,omitempty"`
 	// the proxy vendor requests go through now, and where it came from:
 	// settings, environment, system, off or none
 	ProxyNow    string `json:"proxyNow"`
@@ -178,6 +190,12 @@ type settingsJSON struct {
 
 func settingsState() settingsJSON {
 	s := settingsJSON{Settings: settings.Load(), Version: Version, Dir: tilde(settings.Dir()), Gateway: gateway.URL()}
+	if found, err := discoverTerminals(); err == nil {
+		for _, app := range found.Apps {
+			s.TerminalApps = append(s.TerminalApps, terminalChoice{ID: app.ID, Name: app.Name})
+		}
+		s.TerminalDefault = found.Default
+	}
 	s.FX = currentFX()
 	s.ProxyNow, s.ProxySource = netproxy.Describe()
 	s.Login = autostart.Enabled()
@@ -253,11 +271,28 @@ func Handler(w Windows, gw *gateway.Server) http.Handler {
 	// they came only with the settings, so the tabs showed English first
 	mux.HandleFunc("GET /boot.js", func(rw http.ResponseWriter, r *http.Request) {
 		s := settings.Load()
-		b, _ := json.Marshal(map[string]any{"lang": s.Lang, "theme": s.Theme, "web": isWeb(w)})
+		// and the text size, which the Mac's header measures against the
+		// traffic lights
+		boot := map[string]any{"lang": s.Lang, "theme": s.Theme, "textSize": s.TextSize, "web": isWeb(w)}
+		// on Omarchy the page takes its theme's look before it paints
+		if th, ok := omarchyTheme(); ok {
+			boot["omarchy"] = th
+		}
+		b, _ := json.Marshal(boot)
 		rw.Header().Set("Content-Type", "text/javascript; charset=utf-8")
 		rw.Header().Set("Cache-Control", "no-store")
 		rw.Write(append(append([]byte("window.bootPrefs = "), b...), ";\n"...))
 	})
+	// the Omarchy theme as it is now, asked again every few seconds so a
+	// theme picked in Omarchy's menu reaches the page at once; null off Omarchy
+	mux.HandleFunc("GET /api/omarchy", func(rw http.ResponseWriter, r *http.Request) {
+		if th, ok := omarchyTheme(); ok {
+			writeJSON(rw, th)
+			return
+		}
+		writeJSON(rw, nil)
+	})
+	omarchyRoutes(mux, w)
 	mux.HandleFunc("GET /api/state", func(rw http.ResponseWriter, r *http.Request) {
 		writeJSON(rw, state())
 	})
@@ -424,13 +459,15 @@ func Handler(w Windows, gw *gateway.Server) http.Handler {
 		cur := settings.Load()
 		in.AgentOrder, in.AgentsHidden, in.AgentsShown = cur.AgentOrder, cur.AgentsHidden, cur.AgentsShown
 		in.Window = cur.Window // the window's own, as it was last resized
-		// and what other pages keep here: the models' names, levels and
+		// and what other pages keep here: the models' names, levels, images and
 		// who sees them, and sharing on the network, set on its own
-		in.Visible, in.ModelNames, in.ModelEfforts = cur.Visible, cur.ModelNames, cur.ModelEfforts
+		in.Visible, in.ModelNames, in.ModelEfforts, in.ModelImages = cur.Visible, cur.ModelNames, cur.ModelEfforts, cur.ModelImages
 		in.LAN, in.LANKey = cur.LAN, cur.LANKey
 		in.RedactRules = cur.RedactRules // the masking rules, set on their own
 		// used or left is the Usage page's toggle as much as Settings', set on its own
 		in.QuotaLeft = cur.QuotaLeft
+		// and the text size, which the keyboard changes too (text-size below)
+		in.TextSize = cur.TextSize
 		if v := strings.TrimSpace(in.Vision); v != "" && v != "off" && v != cur.Vision {
 			if _, _, ok := provider.Resolve(v); !ok {
 				fail(rw, fmt.Errorf("no model %s to describe images", v))
@@ -472,6 +509,26 @@ func Handler(w Windows, gw *gateway.Server) http.Handler {
 		}
 		if changed && onTrayUsage != nil {
 			onTrayUsage()
+		}
+		writeJSON(rw, settingsState())
+	})
+	// how large the window and the panel are drawn: Settings' choice and
+	// Ctrl/Cmd +, − and 0 in either, set on its own so a key pressed while
+	// the Settings page saves something else is never undone by it
+	mux.HandleFunc("POST /api/settings/text-size", func(rw http.ResponseWriter, r *http.Request) {
+		var in struct{ Size int }
+		if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+			fail(rw, err)
+			return
+		}
+		s := settings.Load()
+		s.TextSize = in.Size
+		if err := settings.Save(s); err != nil {
+			fail(rw, err)
+			return
+		}
+		if w != nil {
+			w.SetTextSize(in.Size)
 		}
 		writeJSON(rw, settingsState())
 	})
@@ -568,9 +625,15 @@ func Handler(w Windows, gw *gateway.Server) http.Handler {
 				writeJSON(rw, map[string]bool{"ok": true})
 				return
 			}
+		case "titlebar":
+			if c, _, ok := parseTint(r.URL.Query()); ok && w.TintTitleBar(c, r.URL.Query().Get("dark") == "1") {
+				writeJSON(rw, map[string]bool{"ok": true})
+				return
+			}
 		}
 		rw.WriteHeader(http.StatusNoContent)
 	})
+	agentModelsAPI(mux)
 	devListen(mux)
 	return mux
 }
@@ -595,6 +658,9 @@ func state() stateJSON {
 				opts = []agent.Option{}
 			}
 			aj.Fields = append(aj.Fields, fieldJSON{Key: f.Key, Label: f.Label, Value: vals[f.Key], Options: opts})
+		}
+		if takesCatalog(aj.Fields) {
+			aj.Models = modelCount(a.ID)
 		}
 		aj.Drift = a.Drift()
 		if a.Import != nil {

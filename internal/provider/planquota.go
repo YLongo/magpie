@@ -104,6 +104,9 @@ func readZhipuPlan(b []byte) (string, []QuotaWindow, error) {
 			w.Name, w.Aside = "MCP · Month", true
 		case l.Unit == 3:
 			n := max(l.Number, 1)
+			if l.Number <= 0 { // a team's five hours come with no number
+				n = 5
+			}
 			w.Name, w.Span = fmt.Sprintf("%d hours", n), time.Duration(n)*time.Hour
 		case l.Unit == 6:
 			w.Name, w.Span = "7 days", 7*24*time.Hour
@@ -353,7 +356,15 @@ func PlanQuotas(ctx context.Context) []SubscriptionQuota {
 		go func() {
 			defer wg.Done()
 			q := SubscriptionQuota{Provider: j.p.ID, Name: j.p.Name, Icon: j.p.Icon, User: j.user, Windows: []QuotaWindow{}}
-			plan, ws, err := planWindows(ctx, j.src, j.key)
+			plan, ws, err := planWindows(j.p.Via(ctx), j.src, j.key)
+			team := false
+			if zhipu := strings.HasSuffix(j.src.url, "/api/monitor/usage/quota/limit"); zhipu && (err != nil || len(ws) == 0) {
+				// no plan of the key's own: a team's key, whose windows are
+				// asked with type=2 (zcode_team.go)
+				if tplan, tws, terr := zhipuKeyTeamWindows(j.p.Via(ctx), j.src.url, j.key, j.p.ZhipuTeam); terr == nil && len(tws) > 0 {
+					plan, ws, err, team = tplan, tws, nil, true
+				}
+			}
 			switch {
 			case err != nil && !j.src.sure, err == nil && len(ws) == 0:
 				return // a key with no plan
@@ -361,7 +372,7 @@ func PlanQuotas(ctx context.Context) []SubscriptionQuota {
 				q.Error = err.Error()
 			default:
 				q.Plan, q.Windows = plan, ws
-				if strings.HasSuffix(j.src.url, "/api/monitor/usage/quota/limit") { // Zhipu, Z.ai
+				if strings.HasSuffix(j.src.url, "/api/monitor/usage/quota/limit") && !team { // Zhipu, Z.ai
 					q.Until, q.Renew = zhipuTerm(ctx, zcodeRoot(j.src.url), j.key)
 				}
 			}
@@ -384,4 +395,89 @@ func PlanQuotas(ctx context.Context) []SubscriptionQuota {
 		c.Unlock()
 	}
 	return out
+}
+
+// ZhipuTeam is the team a Zhipu or Z.ai key's GLM Coding Plan belongs to:
+// its organization and project IDs, as the BigModel console shows them.
+type ZhipuTeam struct {
+	Org     string `json:"org,omitempty"`
+	Project string `json:"project,omitempty"`
+}
+
+// normal is t as it is kept: trimmed, nil when neither is given.
+func (t *ZhipuTeam) normal() *ZhipuTeam {
+	if t == nil {
+		return nil
+	}
+	n := ZhipuTeam{strings.TrimSpace(t.Org), strings.TrimSpace(t.Project)}
+	if n.Org == "" && n.Project == "" {
+		return nil
+	}
+	return &n
+}
+
+// TakesZhipuTeam says p is a key of Zhipu's or Z.ai's, whose editor then
+// offers the team's organization and project (#236).
+func TakesZhipuTeam(p Provider) bool {
+	if p.Account != nil {
+		return false
+	}
+	src, ok := planQuotaSourceOf(p)
+	return ok && strings.HasSuffix(src.url, "/api/monitor/usage/quota/limit")
+}
+
+// zhipuKeyTeamWindows is a GLM key's windows on a team's GLM Coding Plan:
+// the quota asked with type=2 where ZCode asks it (bigmodel.cn, api.z.ai),
+// with the team's organization and project in the headers: those the user
+// gave the provider, else those of a ZCode account's team key magpie holds
+// (a key pasted alone is asked without them, which is a guess: ZCode
+// always sends them).
+func zhipuKeyTeamWindows(ctx context.Context, quotaURL, key string, team *ZhipuTeam) (plan string, ws []QuotaWindow, err error) {
+	// the key's own host first (open.bigmodel.cn, as CC Switch asks it),
+	// then where ZCode asks it
+	for _, root := range zhipuTeamRoots(quotaURL) {
+		if plan, ws, err = zhipuKeyTeamAt(ctx, root, quotaURL, key, team); err == nil && len(ws) > 0 {
+			return
+		}
+	}
+	return
+}
+
+// zhipuTeamRoots are the hosts a team's quota is asked at, each once.
+func zhipuTeamRoots(quotaURL string) []string {
+	own := strings.TrimSuffix(quotaURL, "/api/monitor/usage/quota/limit")
+	if biz := zcodeBizRoot(quotaURL); biz != own {
+		return []string{own, biz}
+	}
+	return []string{own}
+}
+
+func zhipuKeyTeamAt(ctx context.Context, root, quotaURL, key string, team *ZhipuTeam) (string, []QuotaWindow, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, root+"/api/monitor/usage/quota/limit?type=2", nil)
+	if err != nil {
+		return "", nil, err
+	}
+	req.Header.Set("Authorization", key)
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("Accept-Language", "en-US,en")
+	org, project := zhipuTeamOf(key)
+	if team != nil && team.Org != "" && team.Project != "" {
+		org, project = team.Org, team.Project
+	}
+	if org != "" {
+		for k, v := range zcodeTeamHeaders(quotaURL, org, project) {
+			req.Header.Set(k, v)
+		}
+	}
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return "", nil, err
+	}
+	defer res.Body.Close()
+	b, _ := io.ReadAll(io.LimitReader(res.Body, 1<<20))
+	if res.StatusCode >= 300 {
+		return "", nil, fmt.Errorf("%s", res.Status)
+	}
+	_, ws, err := readZhipuPlan(b)
+	return "GLM Coding Team", ws, err
 }

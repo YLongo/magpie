@@ -18,6 +18,7 @@ import (
 	"github.com/yetone/magpie/internal/imagemcp"
 	"github.com/yetone/magpie/internal/netproxy"
 	"github.com/yetone/magpie/internal/profile"
+	"github.com/yetone/magpie/internal/sessions"
 	"github.com/yetone/magpie/internal/settings"
 	"github.com/yetone/magpie/internal/tui"
 	"github.com/yetone/magpie/internal/update"
@@ -29,6 +30,7 @@ const usage = `magpie — one place to pick every agent's model
 
   magpie                          open the app: a window plus a menu bar icon
   magpie tray                     start in the menu bar only
+  magpie panel                    open the menu bar icon's quick panel, or close it
   magpie autostart [on|off]       open magpie (in the menu bar) when you log in, or say whether it does
   magpie tui                      the same thing, in the terminal
   magpie web [--addr host:port] [--lan] [--no-open]
@@ -99,7 +101,9 @@ func main() {
 	gateway.Version = version
 	netproxy.Install()
 	update.GUI = hasGUI
-	if err := run(os.Args[1:]); err != nil {
+	err := run(os.Args[1:])
+	sessions.Saved() // the session index kept, for the next run
+	if err != nil {
 		fmt.Fprintln(os.Stderr, "magpie:", err)
 		os.Exit(1)
 	}
@@ -139,9 +143,16 @@ func run(args []string) error {
 	case "web":
 		return webCmd(args[1:])
 	case "app", "gui":
+		// `magpie gui settings`: the window on that tab, as a restart to
+		// update from it comes back (update.RelaunchArgs)
+		if len(args) > 1 {
+			return runWindow(args[1])
+		}
 		return runGUI(true, "")
 	case "tray":
 		return runGUI(false, "")
+	case "panel":
+		return runPanel()
 	case "autostart":
 		return autostartCmd(args[1:])
 	case "-h", "--help", "help":

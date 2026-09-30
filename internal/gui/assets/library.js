@@ -97,12 +97,36 @@
   // An agent's icon, made once and copied: a list of hundreds of skills has
   // a chip for each agent on every row, and making each icon afresh (its
   // image, and a probe of whether it loads) was most of drawing the list.
+  // One whose picture didn't load is let go, so the next row makes it
+  // afresh: kept, its copies would all be empty until the page was loaded
+  // again (as Claude Code's were seen to, in the skills list).
+  // It's made apart from the Providers page's kept icons, which are its
+  // own rows' to take back.
   const icons = new Map();
   function agentIcon(name) {
     let i = icons.get(name);
-    if (!i) { icons.set(name, (i = icon(name))); greyIcon(i); }
+    if (!i) {
+      const kept = keptIcons;
+      keptIcons = null;
+      try { i = icon(name); } finally { keptIcons = kept; }
+      icons.set(name, i);
+      const im = i.querySelector(":scope > img");
+      if (im) im.onerror = () => { if (icons.get(name) === i) icons.delete(name); };
+      greyIcon(i);
+    }
     return i.cloneNode(true);
   }
+  // A copy already drawn whose picture failed asks for it again, a few
+  // times and a little later each time; the grey copy is left to the filter.
+  document.addEventListener("error", (e) => {
+    const im = e.target;
+    if (im.tagName !== "IMG" || im.classList.contains("grey") || !im.parentElement?.classList.contains("ic") || !im.closest("#view-library, #modal.lib")) return;
+    const n = +(im.dataset.tries || 0);
+    if (n >= 3) return;
+    im.dataset.tries = n + 1;
+    setTimeout(() => { if (im.isConnected) im.src = srcOf(im) + "?try=" + (n + 1); }, 400 * (n + 1));
+  }, true);
+  const srcOf = (im) => (im.getAttribute("src") || "").split("?")[0];
 
   // A chip's icon is grey while its agent hasn't the item. A filter made it
   // so on every paint of every chip — most of what a scroll through
@@ -112,7 +136,7 @@
   // grey (library.css). Until then, or if it can't be, the filter does it.
   function greyIcon(i) {
     if (i.querySelector(":scope > .mask, :scope > svg")) { i.classList.add("flat"); return; }
-    const src = i.querySelector(":scope > img")?.getAttribute("src");
+    const src = i.querySelector(":scope > img") && srcOf(i.querySelector(":scope > img"));
     if (!src) return;
     greyCopy(src).then((url) => {
       if (!url) return;
@@ -126,7 +150,7 @@
         ic.classList.add("baked");
       };
       add(i);
-      for (const x of document.querySelectorAll(".lib-ag > .ic:not(.baked) > img")) if (x.getAttribute("src") === src) add(x.parentElement);
+      for (const x of document.querySelectorAll(".lib-ag > .ic:not(.baked) > img")) if (srcOf(x) === src) add(x.parentElement);
     }, () => {});
   }
   // grayscale(1)'s own sum: each colour's red, green and blue become this
@@ -266,6 +290,7 @@
         status(e.message, "err", 6000);
       }
       writing.delete(key);
+      syncProblems();
       // the page held the clicks: what magpie really has is read again
       if (failed) await api("library").then(take, () => {});
       const x = lib[list].find((y) => y.name === name);
@@ -345,6 +370,52 @@
     else status(t("Saved — the agents already had it"), "ok");
   }
 
+  // What the last change couldn't write, whole: a chip's amber dot holds
+  // only its own item's, so an agent's instructions, its MCP file, a
+  // project or a skill that wouldn't update were said once in a toast
+  // ("see Library") and shown nowhere.
+  function problemsCard() {
+    const list = lib.problems || [];
+    if (!list.length) return null;
+    const card = el("div", "lib-problems");
+    card.setAttribute("role", "status");
+    const ttl = el("div", "lib-problems-head");
+    const again = button(t("Try again"), "action", () => change("all/sync", {}));
+    again.title = t("Writes the library into every agent again");
+    ttl.append(el("span", "lib-problems-dot"), el("b", "", t("Some of the Library couldn't be written")), el("span", "grow"), again);
+    const ul = el("ul");
+    for (const p of list) {
+      const li = el("li");
+      const who = p.what.startsWith("project:") ? tilde(p.agent) : p.agent ? nameOf(p.agent) : "";
+      if (who) li.append(el("b", "", who), el("span", "lib-problems-sep", " · "));
+      li.append(el("span", "", problemWhat(p.what)), el("span", "lib-problems-err", p.error));
+      ul.append(li);
+    }
+    card.append(ttl, ul);
+    return card;
+  }
+  function problemWhat(what) {
+    const [kind, ...rest] = what.split(":");
+    const name = rest.join(":");
+    if (kind === "instructions") return t("Instructions");
+    if (kind === "mcp") return name ? t("MCP server {name}", { name }) : t("MCP servers");
+    if (kind === "skill") return t("Skill {name}", { name });
+    if (kind === "project") return name ? t("Skill {name}", { name }) : t("The project");
+    return what;
+  }
+  // a chip's write changes the list without drawing the page again: the
+  // card is put right in place (the chip clicked is held where it is on the
+  // screen by app.js, as for any click)
+  function syncProblems() {
+    const was = page.querySelector(":scope > .lib-problems");
+    const card = problemsCard();
+    if (!was && !card) return;
+    if (was && card && was.textContent === card.textContent) return;
+    if (was && card) was.replaceWith(card);
+    else if (was) was.remove();
+    else page.querySelector(":scope > .lib-head")?.after(card);
+  }
+
   function renderLoading() {
     page.replaceChildren();
     shown = "";
@@ -388,6 +459,8 @@
     }
     // what changed in a tab is drawn in place: only another tab (or the
     // first one after the skeleton) fades in
+    const problems = problemsCard();
+    if (problems) page.append(problems);
     const body = el("div", "lib-body" + (shown !== tab ? " enter" : ""));
     shown = tab;
     if (tab === "instructions") renderInstructions(body);
@@ -835,6 +908,7 @@
       det.append(w);
     }
     if (a.agent === "opencode" || a.agent === "mimocode") det.append(el("p", "lib-aside", t("{agent} reads Claude Code's CLAUDE.md when it has no AGENTS.md of its own.", { agent: a.name })));
+    if (a.agent === "agy") det.append(el("p", "lib-aside", t("Antigravity reads Gemini CLI's ~/.gemini/GEMINI.md as well as this file, so text given to both is read twice.")));
     const lab = el("label", "lib-lab", t("Only for {agent}, after the shared text", { agent: a.name }));
     const ta = el("textarea", "lib-text small");
     ta.dataset.lib = "extra:" + a.agent;
@@ -2210,13 +2284,15 @@
     const sub = el("div", "sub", f.description || "");
     sub.title = f.description || "";
     who.append(sub);
+    if (f.shared) { const src = el("div", "lib-src"); src.append(el("span", "", t("shared in")), pathLink(f.shared)); who.append(src); }
     if (f.link) { const src = el("div", "lib-src"); src.append(el("span", "", t("linked from")), pathLink(f.link)); who.append(src); }
     const have = el("div", "lib-have");
     for (const id of f.agents) { const a = agentOf(id); if (a) { const i = agentIcon(a.icon); i.title = a.name; have.append(i); } }
     row.append(glyph(GLYPH.skill), who, have);
     if (f.others?.length) row.append(tag(t("differs in {agents}", { agents: f.others.map(nameOf).join(", ") }), "warn", t("{agents} has another skill by this name; bringing this one in leaves that one as it is", { agents: f.others.map(nameOf).join(", ") })));
     const b = button(t("Bring in"), "action", () => change("skills/import", { name: f.name }, t("{name} is in the library now", { name: f.name })));
-    b.title = f.link ? t("Keeps a link to where it is: {agents} go on having it, and you can give it to the others", { agents: f.agents.map(nameOf).join(", ") })
+    b.title = f.shared ? t("Keeps it where it is in the shared skills folder and links to it: you can give it to any agent")
+      : f.link ? t("Keeps a link to where it is: {agents} go on having it, and you can give it to the others", { agents: f.agents.map(nameOf).join(", ") })
       : t("Moves it into the library and links it back: {agents} go on having it, and you can give it to the others", { agents: f.agents.map(nameOf).join(", ") });
     row.append(b);
     return row;

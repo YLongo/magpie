@@ -132,9 +132,12 @@ test("no built-in newer than Safari 15.0 unless compat.js fills it in", async ()
 
 test("compat.js is the first of the page's own scripts", async () => {
   const html = await read("index.html");
-  const srcs = [...html.matchAll(/<script\s+src="([^"]+)"/g)].map((m) => m[1]).filter((s) => s !== "boot.js");
+  // boot.js and omarchy.js run in the head, before the first paint:
+  // omarchy.js does nothing off Omarchy, whose WebKitGTK is a current one
+  const all = [...html.matchAll(/<script\s+src="([^"]+)"/g)].map((m) => m[1]);
+  const srcs = all.filter((s) => s !== "boot.js" && s !== "omarchy.js");
   assert.equal(srcs[0], "compat.js", "loaded first: " + srcs.join(", "));
-  for (const f of await scripts()) assert(srcs.includes(f), f + " is not loaded by index.html");
+  for (const f of await scripts()) assert(all.includes(f), f + " is not loaded by index.html");
 });
 
 test("the styles hold up in Safari 15.0", async () => {
@@ -212,11 +215,12 @@ test("with Safari 15.0's built-ins, the panel and the window draw every page", a
       assert.equal(await page.evaluate(() => [1, 2, 3].at(-1)), 3);
       if (mode === "panel") {
         assert(await page.locator("#ptabs").isVisible(), "the panel's tabs are the page's own, drawn by app.js");
-        for (const tab of ["usage", "routing", "agents", "profiles"]) {
+        for (const tab of ["usage", "routing", "agents"]) {
           const b = page.locator(`#ptabs [data-ptab="${tab}"]`);
           if (await b.isVisible()) await b.click();
           await page.waitForTimeout(150);
         }
+        await page.locator("#profBtn").click();
         await page.locator("#save").click();
         assert(await page.locator(".profiles.naming > .chip-input").isVisible(), "Save current opens the name field");
       } else {

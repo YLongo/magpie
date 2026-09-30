@@ -253,7 +253,7 @@ func (b *subscriptionBridge) start(ctx context.Context, req *Request, model, oau
 	args := claudeCLIArgs(model, string(mcpConfig), req.Effort, req.WebSearch)
 	cmd := proc.CommandContext(context.Background(), binary, args...)
 	cmd.Dir = tmp
-	cmd.Env = netproxy.Env(cleanClaudeEnv(os.Environ()))
+	cmd.Env = netproxy.EnvWith(claudeProxy(ctx), cleanClaudeEnv(os.Environ()))
 	if oauth != "" {
 		// a saved account in use beside the one Claude Code is signed in to
 		cmd.Env = append(cmd.Env, "CLAUDE_CODE_OAUTH_TOKEN="+oauth)
@@ -391,10 +391,12 @@ func (r *subscriptionRun) ended(req *Request, said, stop string, ok bool) {
 	case stop != "stop":
 		r.abort()
 		return
-	case len(req.Tools) == 0 && len(req.Messages) < 2:
+	case len(req.Tools) == 0 && !hasReply(req.Messages):
 		// a one-off ask — an agent's title or topic, the router's
-		// classifier — has no next turn: kept, it would be a Claude Code
-		// process idle for idleLongest, several at once
+		// classifier, Claude Code's auto mode classifier with its
+		// transcript in several user messages (#250) — has no next turn:
+		// kept, it would be a Claude Code process idle for idleLongest,
+		// several at once, pushing out the conversations' own
 		r.abort()
 		return
 	}
@@ -1180,11 +1182,18 @@ func (b *subscriptionBridge) removeRun(run *subscriptionRun) {
 
 func (s *Server) serveClaudeSubscription(w http.ResponseWriter, r *http.Request, from provider.Protocol, p provider.Provider, model string, body []byte, usage *Usage) (int, string) {
 	start := func(ctx context.Context, req *Request) (*subscriptionRun, <-chan Event, error) {
+		ctx = p.Via(ctx) // the account's own proxy, its CLI run's too
 		owner := p.ID + "\x00" + p.Account.User
 		if run, events := s.subscription.resume(req, owner); run != nil {
 			return run, events, nil
 		}
 		s.subscription.retire(owner, req.Messages)
+		if req.Effort == "" && autoModeClassifier(req) {
+			// Claude Code's auto mode classifier asks a verdict of a few
+			// words within a minute; a Claude Code run at its default
+			// effort can think past that (#250)
+			req.Effort = "low"
+		}
 		token, _, err := p.Account.Token(ctx)
 		if err != nil {
 			return nil, nil, err

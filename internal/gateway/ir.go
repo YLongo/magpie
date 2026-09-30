@@ -107,14 +107,23 @@ type Request struct {
 	// id), which OpenAI, and relays in front of it, route a conversation by
 	// to where its prompt is cached.
 	CacheKey string
+	// GeminiCompat is the upstream being Gemini's OpenAI-compatible API
+	// (AI Studio's, or a proxy in front of it on this machine or the LAN),
+	// which gives the model's thoughts only when asked in thinking_config.
+	GeminiCompat bool
 	// Namespaced are the tools a Responses client offered inside a
 	// namespace, by the flat name the model is offered them under.
 	Namespaced map[string]nsTool
 }
 
 // nsTool is a tool as a Responses client knows it: by its namespace and its
-// name in it (Codex's collaboration.spawn_agent).
-type nsTool struct{ Namespace, Name string }
+// name in it (Codex's collaboration.spawn_agent). Search is Codex's own
+// tool search, offered to the model as a function and handed back as the
+// tool_search_call Codex runs.
+type nsTool struct {
+	Namespace, Name string
+	Search          bool
+}
 
 // EventKind is what a streamed event carries.
 type EventKind int
