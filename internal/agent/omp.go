@@ -1,26 +1,76 @@
 package agent
 
-// omp (oh-my-pi, a fork of Pi) keeps its settings in ~/.omp/agent/config.yml,
+// omp (oh-my-pi, a fork of Pi) keeps its settings in ~/.omp/agent/config.yml
+// (or where ompDir says its variables move it),
 // the model of each role under modelRoles as "provider/model", and providers
 // of the user's own in models.yml beside it. magpie adds itself there as the
 // provider "magpie", keyless (auth: none), with the catalog as its models; a
 // model through magpie is "magpie/<provider>/<model>", which omp matches
-// whole against provider/id.
+// whole against provider/id. The other roles, the fallback chains and the
+// like may name them as well (ompRefKeys); magpie stays while any does.
 
 import (
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 
 	"github.com/yetone/magpie/internal/edit"
+	"github.com/yetone/magpie/internal/gateway"
+	"github.com/yetone/magpie/internal/provider"
 )
 
 // ompEfforts are the thinking levels omp knows.
 var ompEfforts = []string{"minimal", "low", "medium", "high", "xhigh", "max"}
 
+// ompRefKeys are where omp's config names models: each role (a list to try
+// in order, "a,b" or a sequence), the retry fallback chains (model keys and
+// their entries), the models it cycles through (enabledModels, also scoped
+// to paths) and the models of task agents. An entry may end in a thinking
+// level ("magpie/deepseek/pro:max").
+var ompRefKeys = []string{"modelRoles", "retry.fallbackChains", "enabledModels", "task.agentModelOverrides"}
+
+// ompRefs calls fn on each model of a value under ompRefKeys, the spaces
+// after a comma kept, and answers the value with fn's answers in place.
+func ompRefs(v string, fn func(string) string) string {
+	parts := strings.Split(v, ",")
+	for i, p := range parts {
+		lead := len(p) - len(strings.TrimLeft(p, " \t"))
+		parts[i] = p[:lead] + fn(p[lead:])
+	}
+	return strings.Join(parts, ",")
+}
+
+// ompProfileName is a profile name omp takes (pi-utils dirs.ts,
+// normalizeProfileName); it refuses any other.
+var ompProfileName = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,63}$`)
+
+// ompDir is omp's agent folder, found as omp's pi-utils (dirs.ts) finds it:
+// under ~/.omp, or ~/$PI_CONFIG_DIR; a profile's (OMP_PROFILE, else
+// PI_PROFILE; "default" is none) is profiles/<name>/agent there; with none,
+// PI_CODING_AGENT_DIR — the variable Pi reads — moves it, else it is
+// agent there. omp takes that variable as given, without expanding "~".
+func ompDir(home string) string {
+	root := filepath.Join(home, ".omp")
+	if d := os.Getenv("PI_CONFIG_DIR"); d != "" {
+		root = filepath.Join(home, d)
+	}
+	p, set := os.LookupEnv("OMP_PROFILE")
+	if !set {
+		p = os.Getenv("PI_PROFILE")
+	}
+	if p = strings.TrimSpace(p); p != "" && p != "default" && ompProfileName.MatchString(p) && !strings.HasSuffix(p, ".") {
+		return filepath.Join(root, "profiles", p, "agent")
+	}
+	if d := os.Getenv("PI_CODING_AGENT_DIR"); filepath.IsAbs(d) {
+		return filepath.Clean(d)
+	}
+	return filepath.Join(root, "agent")
+}
+
 func omp(home string) *Agent {
-	dir := filepath.Join(home, ".omp", "agent")
+	dir := ompDir(home)
 	// omp reads the .yml and falls back to the .yaml
 	pick := func(name string) string {
 		yml := filepath.Join(dir, name+".yml")
@@ -34,11 +84,13 @@ func omp(home string) *Agent {
 	path := pick("config")
 	get := func() string { v, _ := edit.GetYAML(path, "modelRoles.default"); return v }
 	dropMagpie := func() error {
-		// another role may still go through magpie
-		for _, v := range edit.GetYAMLMap(path, "modelRoles") {
-			if usesMagpie(v) {
-				return nil
-			}
+		// another role, a fallback chain, … may still go through magpie
+		used := false
+		if err := edit.EditYAMLStrings(path, ompRefKeys, func(v string) string {
+			ompRefs(v, func(m string) string { used = used || usesMagpie(m); return m })
+			return v
+		}); err != nil || used {
+			return err
 		}
 		return edit.DelYAML(pick("models"), "providers."+magpieID)
 	}
@@ -59,6 +111,22 @@ func omp(home string) *Agent {
 		Bin: "omp", Dir: dir, Path: path,
 		Sync: func() error {
 			return syncYAML(pick("models"), "providers."+magpieID, func() any { return ompProvider() })
+		},
+		// a provider renamed takes its models' ids in models.yml with it; a
+		// name left on the old one omp would pass over, with a warning
+		RenameRefs: func(from, to string) (bool, error) {
+			old, now := magpieID+"/"+from+"/", magpieID+"/"+to+"/"
+			moved := false
+			err := edit.EditYAMLStrings(path, ompRefKeys, func(v string) string {
+				return ompRefs(v, func(m string) string {
+					if rest, ok := strings.CutPrefix(m, old); ok {
+						moved = true
+						return now + rest
+					}
+					return m
+				})
+			})
+			return moved, err
 		},
 		Notice: func() string {
 			if Running(`(^|/)omp( |$)`, `@oh-my-pi/pi-coding-agent`) {
@@ -117,9 +185,13 @@ func omp(home string) *Agent {
 type ompModel struct {
 	ID        string       `yaml:"id"`
 	Name      string       `yaml:"name,omitempty"`
+	API       string       `yaml:"api,omitempty"`
+	BaseURL   string       `yaml:"baseUrl,omitempty"`
 	Reasoning bool         `yaml:"reasoning"`
 	Thinking  *ompThinking `yaml:"thinking,omitempty"`
 	Context   int          `yaml:"contextWindow,omitempty"`
+	MaxTokens int          `yaml:"maxTokens,omitempty"`
+	Input     []string     `yaml:"input,omitempty"`
 }
 
 type ompThinking struct {
@@ -135,20 +207,53 @@ type ompProviderEntry struct {
 }
 
 // ompProvider is magpie's entry in models.yml. The thinking efforts are the
-// levels omp offers for the model; it sends them as reasoning_effort.
+// levels omp offers for the model; on Chat it sends them as
+// reasoning_effort.
+//
+// As for Pi, each model is asked on the API its provider speaks natively, so
+// the gateway relays what omp sent as it is instead of translating Chat: a
+// Claude over Chat lost its thinking's signatures between tool turns, as
+// Chat has no place for them. One served on OpenAI's Responses API goes to
+// baseUrl/responses; one on Anthropic's Messages API to the gateway's
+// /v1/messages (omp adds the /v1). That one thinks adaptively when it takes
+// nothing else, else on a budget: omp's anthropic-budget-effort would also
+// send output_config.effort, which Sonnet 4.5 and Haiku 4.5 refuse.
 func ompProvider() ompProviderEntry {
 	ms := []ompModel{}
 	for _, m := range magpieModels("omp") {
-		e := ompModel{ID: m.ID, Name: m.Name, Context: m.Context}
+		e := ompModel{ID: m.ID, Name: m.Name, Context: m.Context, MaxTokens: maxTokens(m)}
+		mode := "effort"
+		switch {
+		case slices.Contains(m.APIs, string(provider.Responses)):
+			e.API = "openai-responses"
+		case slices.Contains(m.APIs, string(provider.Anthropic)):
+			e.API, e.BaseURL = "anthropic-messages", gateway.URL()
+			mode = "budget"
+			if gateway.AdaptiveThinking(m.ID) {
+				mode = "anthropic-adaptive"
+			}
+		}
+		// Without input omp takes it from a bundled model its fuzzy id match
+		// finds, else text only; a model the source never answered for is
+		// left to that guess.
+		switch {
+		case m.Images:
+			e.Input = []string{"text", "image"}
+		case m.ImageInput != nil:
+			e.Input = []string{"text"}
+		}
 		var efforts []string
 		for _, x := range ompEfforts { // in omp's order
-			if slices.Contains(m.Efforts, x) {
+			// a model's efforts stop at xhigh (omp 16.3.5 turns the whole
+			// file away over a max): a model whose top is max offers xhigh,
+			// which the gateway fits to max
+			if x == "xhigh" && slices.Contains(m.Efforts, "max") || x != "max" && slices.Contains(m.Efforts, x) {
 				efforts = append(efforts, x)
 			}
 		}
 		if len(efforts) > 0 {
 			e.Reasoning = true
-			e.Thinking = &ompThinking{Mode: "effort", Efforts: efforts}
+			e.Thinking = &ompThinking{Mode: mode, Efforts: efforts}
 		}
 		ms = append(ms, e)
 	}

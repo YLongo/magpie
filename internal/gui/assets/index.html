@@ -10,6 +10,7 @@
 <link rel="stylesheet" href="app.css">
 <link rel="stylesheet" href="routing.css">
 <link rel="stylesheet" href="library.css">
+<link rel="stylesheet" href="plugins.css">
 <link rel="stylesheet" href="omarchy.css">
 </head>
 <body>
@@ -25,13 +26,14 @@
     <button data-view="routing" data-t>Routing</button>
     <button data-view="usage" data-t>Usage</button>
     <button data-view="library" data-t>Library</button>
+    <button data-view="plugins" data-t>Plugins</button>
   </nav>
   <div class="actions" style="--wails-draggable:no-drag">
     <button class="update" id="update" hidden>
       <svg viewBox="0 0 16 16" width="11" height="11"><path d="M8 13V3.5M3.75 7.5 8 3.25l4.25 4.25" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
       <span>Update</span>
     </button>
-    <button class="icon" id="sync" title="Refresh model lists (models.dev and every vendor)" data-tt>
+    <button class="icon" id="sync" title="Refresh model lists (models.dev and every vendor) and check for a newer magpie" data-tt>
       <svg viewBox="0 0 16 16" width="14" height="14"><path d="M13.5 8a5.5 5.5 0 1 1-1.6-3.9M13.5 2v3h-3" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
     </button>
     <button class="icon" id="open" title="Open as a window" data-tt>
@@ -68,6 +70,7 @@
   <div id="excluded"></div>
   <div class="after-list">
     <button class="text" id="addProvider" data-t>＋ Add provider</button>
+    <button class="more-subs" id="moreSubs" type="button" title="Cursor, Copilot, Gemini and others, each signed in to by a plugin you install from the Plugins tab" data-tt><span class="stack"></span><span class="say"><span data-t>More subscriptions</span><span class="in" data-t>in Plugins</span></span></button>
   </div>
   <section class="sheet" id="addSheet" hidden></section>
 </main>
@@ -157,6 +160,8 @@
 
 <main class="view" id="view-library" hidden></main>
 
+<main class="view" id="view-plugins" hidden></main>
+
 <main class="view" id="view-settings" hidden>
   <div class="row-head"><span class="label" data-t>Preferences</span></div>
   <div class="list prefs">
@@ -195,6 +200,10 @@
     <div class="row pref">
       <div class="who"><div class="name" data-t>Currency</div><div class="sub" id="currencySub"></div></div>
       <div id="currencySegs"></div>
+    </div>
+    <div class="row pref">
+      <div class="who"><div class="name" data-t>Provider in model names</div><div class="sub" data-t>Agents’ model lists name each model with its provider or “routing group” after it. Off, the name alone, unless two would read the same</div></div>
+      <div id="plainNamesSegs"></div>
     </div>
     <div class="row pref">
       <div class="who"><div class="name" data-t>Open at login</div><div class="sub" data-t>Start magpie in the tray when you log in, so agents find the gateway from the start</div></div>
@@ -293,5 +302,6 @@
 <script src="app.js"></script>
 <script src="routing.js"></script>
 <script src="library.js"></script>
+<script src="plugins.js"></script>
 </body>
 </html>

@@ -159,7 +159,9 @@ type Call struct {
 	Agent string    `json:"agent"` // who called, from the client's User-Agent
 	// Kind: what the agent made the call for, when it isn't its turn —
 	// a Codex subagent's (callKind) — "" for a turn
-	Kind     string            `json:"kind,omitempty"`
+	Kind string `json:"kind,omitempty"`
+	// For: the request a call of magpie's own (a web search) was made for
+	For      *CallFor          `json:"for,omitempty"`
 	Model    string            `json:"model"`
 	Provider string            `json:"provider"`
 	From     provider.Protocol `json:"from"`
@@ -273,6 +275,8 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 	go provider.KeepClaudeWindowsWarm(ctx, warmClaude)
 	// and checks the WorkBuddy accounts in for the day's credits
 	go provider.KeepWorkBuddyCheckedIn(ctx)
+	// and moves the built-in subscriptions being retired onto their plugins
+	go provider.KeepRetiringMoved(ctx)
 	for _, f := range WhileServing {
 		go f(ctx)
 	}
@@ -560,6 +564,9 @@ func (s *Server) handle(from provider.Protocol) http.HandlerFunc {
 			writeError(w, from, 400, err.Error())
 			return
 		}
+		if from == provider.Chat {
+			body = thinkingEffort(body)
+		}
 		s.serve(w, r, from, body)
 	}
 }
@@ -655,6 +662,9 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 	w = capture
 	call := Call{Time: start, From: from, Model: unprefixed(modelOf(body)), Agent: agentOf(r), Kind: callKind(r.Header),
 		RequestBody: requestBody, RequestTruncated: requestTruncated}
+	if call.Kind == "web_search" {
+		call.For = searchFor(r.Context())
+	}
 	usage.Saw(call.Agent)
 	finishCapture := func() {
 		call.ResponseBody = capture.body.text()
@@ -704,6 +714,7 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 	// a routing group's rules pick the member that goes first, looked at
 	// before any image is taken out of the request: one may be for images
 	g, ms, isGroup := provider.FindGroup(asked)
+	g = g.Live() // a manual group's rules wait
 	var hit *RuleHit
 	var ruled []provider.Member
 	var ruleAt, words string
@@ -881,18 +892,31 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 			}
 		}
 	}
+	pin := strings.TrimSpace(r.Header.Get(AccountHeader))
+	if pin != "" {
+		var status int
+		var msg string
+		if cands, pl, status, msg = pinTo(pin, cands, pl); status != 0 {
+			call.Status, call.Error = status, "account pinned: "+pin
+			writeError(w, from, status, msg)
+			finishCapture()
+			s.record(call)
+			return
+		}
+	}
 	shown := aff
 	if len(cands) == 1 {
 		shown = nil // nobody else to stay away from
 	}
-	tr := s.trace.begin(Route{Time: start, Agent: call.Agent, Kind: call.Kind, Model: call.Model, Effort: requestEffort(from, body), Provider: p.ID, Group: group, Rule: hit, Nested: nested, Affinity: shown, Order: pl.order, Left: pl.left})
+	tr := s.trace.begin(Route{Pinned: pin, Time: start, Agent: call.Agent, Kind: call.Kind, For: call.For, Model: call.Model, Effort: requestEffort(from, body), Provider: p.ID, Group: group, Rule: hit, Nested: nested, Affinity: shown, Order: pl.order, Left: pl.left})
 	var skipped []string
-	sent := ""        // the reasoning the last try's model was asked for
-	where := ""       // the last try's provider.Where, for the usage
-	again := 0        // times the last one left has been tried again
-	resealed := false // the conversation's reasoning sealed by another account taken out
-	floored := false  // the reply's length raised to what the provider takes
-	var other *Try    // the first failure that wasn't an allowance run out
+	sent := ""         // the reasoning the last try's model was asked for
+	where := ""        // the last try's provider.Where, for the usage
+	again := 0         // times the last one left has been tried again
+	resealed := 0      // what of the conversation another account sealed was taken out: its reasoning, then its compaction
+	floored := false   // the reply's length raised to what the provider takes
+	var other *Try     // the first failure that wasn't an allowance run out
+	autoReset := false // a Codex or Claude reset looked at, once a request
 	for i := 0; i < len(cands); i++ {
 		c := cands[i]
 		last := i == len(cands)-1
@@ -983,15 +1007,29 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 			s.trace.update(tr, func(t *Route) { t.Tries[len(t.Tries)-1] = try })
 			break
 		}
-		if !resealed && from == provider.Responses && !hw.passing && hw.code() >= 400 && foreignReasoning.Match(hw.errBody()) {
+		if resealed < 2 && from == provider.Responses && !hw.passing && hw.code() >= 400 && foreignReasoning.Match(hw.errBody()) {
 			// the conversation moved here from another account or vendor,
 			// whose sealed reasoning this one can't read: asked again
 			// without it, and what it refused isn't sent here again. xAI
 			// says so as a 400, or as the stream's error, which may be
-			// read as another status
-			if b, ok := withoutReasoning(body); ok {
-				refused(stuck, c.who(), attemptBody)
-				resealed, body = true, b
+			// read as another status. Refused again, or with no reasoning
+			// to leave out, it's the compaction OpenAI sealed that goes
+			// (waroy: Codex compacted on GPT, then switched to Grok)
+			b, ok := []byte(nil), false
+			if resealed == 0 {
+				resealed = 1
+				if b, ok = withoutReasoning(body); ok {
+					refused(stuck, c.who(), attemptBody, "reasoning")
+				}
+			}
+			if !ok {
+				resealed = 2
+				if b, ok = withoutCompaction(body); ok {
+					refused(stuck, c.who(), attemptBody, compactionKinds...)
+				}
+			}
+			if ok {
+				body = b
 				try.Fail = failForeign
 				s.trace.update(tr, func(t *Route) { t.Tries[len(t.Tries)-1] = try })
 				i--
@@ -1015,6 +1053,7 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 			try.Fail = failRefused
 			s.trace.update(tr, func(t *Route) { t.Tries[len(t.Tries)-1] = try })
 			skipped = append(skipped, c.label()+": "+call.Error)
+			matesFirst(cands[i+1:], c)
 			if call.To != "" {
 				usage.Append(usage.Record{Time: began, Agent: call.Agent, Provider: call.Provider, Host: where, Model: c.model,
 					Requested: call.Model, Served: call.Usage.Served,
@@ -1065,6 +1104,21 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 				call.Status, call.Error = 499, "the agent canceled the request"
 			}
 			break
+		}
+		// (not for one account pinned: the others weren't asked)
+		if !autoReset && pin == "" && last && other == nil && hw.failed() && !hw.passing && failure(hw.code(), hw.errBody()) == failQuota {
+			// everyone is out of their allowance: a Codex or Claude account
+			// the user lets spend its resets by itself, its week used up,
+			// spends one and is asked again
+			autoReset = true
+			if pick, out, ok := s.autoReset(r.Context(), cands, c); ok {
+				try.Fail = failQuota
+				try.Reset = &AutoReset{Who: pick.p.Account.User, Text: out.Text(), Agent: pick.p.Account.Agent}
+				s.trace.update(tr, func(t *Route) { t.Tries[len(t.Tries)-1] = try })
+				skipped = append(skipped, c.label()+": "+call.Error, pick.label()+": used one of its resets by itself ("+out.Text()+")")
+				cands = append(cands[:len(cands):len(cands)], pick)
+				continue
+			}
 		}
 		if hw.refused && !hw.passing {
 			// nobody is left: the agent is told it was refused, as a
@@ -1311,6 +1365,18 @@ func (s *Server) forwardOnce(ctx context.Context, p provider.Provider, to provid
 			req.Header.Del("anthropic-beta")
 		}
 	}
+	if p.Account == nil && (to == provider.Responses || to == provider.Chat) && fromCodex(in) {
+		// a relay that serves only Codex (Discord: "This account only
+		// allows Codex official clients") knows it by its User-Agent,
+		// originator and x-codex- headers, which go on as Codex sent them,
+		// as they do when Codex talks to the relay itself; its key to
+		// magpie never does
+		for k, vs := range in {
+			if codexClientHeader(k) {
+				req.Header[k] = slices.Clone(vs)
+			}
+		}
+	}
 	if p.IsOpenCode() {
 		req.Header.Set("x-opencode-session", conversationID(in, body))
 	}
@@ -1324,10 +1390,13 @@ func (s *Server) forwardOnce(ctx context.Context, p provider.Provider, to provid
 			}
 		}
 	}
+	if p.IsPlugin() {
+		req.Header.Set(provider.ConversationHeader, conversationID(in, body))
+	}
 	if err := p.Sign(ctx, req, to, body); err != nil {
 		return nil, err
 	}
-	return s.client.Do(req)
+	return p.Do(s.client, req)
 }
 
 // fromClaudeCode is a request Claude Code sent, by the User-Agent it gives
@@ -1352,6 +1421,31 @@ func claudeCodeHeader(k string) bool {
 	return false
 }
 
+// fromCodex is a request Codex sent — its CLI, exec, the IDE extension or
+// the desktop app — by the User-Agent (codex_cli_rs/0.159.2 (Mac OS 26.6.0;
+// arm64) kitty, Codex Desktop/0.162.3 …) or the originator it gives
+// (codex_cli_rs, codex_exec, codex_vscode, Codex Desktop).
+func fromCodex(in http.Header) bool {
+	for _, v := range []string{in.Get("User-Agent"), in.Get("originator")} {
+		if strings.HasPrefix(strings.ToLower(v), "codex") {
+			return true
+		}
+	}
+	return false
+}
+
+// codexClientHeader is one of the headers Codex tells itself by to an API
+// it talks to with a key: its User-Agent and originator, the session and
+// thread (session-id, thread-id), and what codexHeader lets through. Never
+// the key it was given, nor its sign-in's attestation.
+func codexClientHeader(k string) bool {
+	switch strings.ToLower(k) {
+	case "user-agent", "originator", "session-id", "thread-id":
+		return true
+	}
+	return codexHeader(k)
+}
+
 // passthrough relays a request the provider understands as-is, with the
 // model name swapped for the provider's own. The token counts the reply
 // carries are read on the way past into u. done is false, with nothing
@@ -1366,6 +1460,7 @@ func (s *Server) passthrough(w http.ResponseWriter, r *http.Request, p provider.
 		if p.Account == nil || p.Account.Agent != "codex" {
 			body, searchFn = searchAsFunction(body)
 		}
+		body = forVendor(p, body)
 	case provider.Chat:
 		body = developerAsSystem(body)
 		if strings.HasSuffix(p.Host(), "openai.com") || p.IsAzure() {
@@ -2076,6 +2171,13 @@ var sessionHeaders = []string{
 // agent names itself in sessionHeaders is taken.
 const SessionHeader = "X-Magpie-Session"
 
+// AccountHeader pins a request to one of a subscription's accounts, by its
+// user (an email, a login) or its id in the routing trace: only it is
+// tried, and when it can't take the request the caller is told why rather
+// than another account answering — a probe of one account needs that one.
+// It goes no further than magpie.
+const AccountHeader = "X-Magpie-Account"
+
 // sessionOf is the session a request names, "" when it names none.
 func sessionOf(in http.Header) string {
 	for _, h := range append([]string{SessionHeader}, sessionHeaders...) {
@@ -2375,13 +2477,22 @@ var tooLongRe = regexp.MustCompile(`(?i)context_length_exceeded|prompt is too lo
 // tooLong is whether a vendor's error says the conversation no longer
 // fits. One about max_tokens is left alone: the reply's allowance, not
 // the conversation, is what is too big there, and compacting won't help.
+// Nor is a rate limit, however it counts ("Too many tokens, please wait",
+// Bedrock's; "tokens per minute"): told the prompt is too long, Claude Code
+// compacts, and again after the next one, until it gives up as thrashing.
 func tooLong(status int, msg string) bool {
-	if status < 400 || status >= 500 {
+	if status < 400 || status >= 500 || status == http.StatusTooManyRequests {
 		return false
 	}
 	m := strings.ToLower(msg)
 	if strings.Contains(m, "max_tokens") || strings.Contains(m, "max_output_tokens") || strings.Contains(m, "max_completion_tokens") {
 		return false
 	}
+	if paceWords.MatchString(msg) {
+		return false
+	}
 	return tooLongRe.MatchString(msg)
 }
+
+// paceWords say a limit on how fast or how much, not on one prompt's size.
+var paceWords = regexp.MustCompile(`(?i)rate.?limit|per (minute|hour|day)|\bTP[MD]\b|please wait|try again later|throttl`)

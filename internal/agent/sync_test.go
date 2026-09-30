@@ -13,6 +13,7 @@ import (
 	"github.com/yetone/magpie/internal/edit"
 	"github.com/yetone/magpie/internal/provider"
 	"github.com/yetone/magpie/internal/settings"
+	"gopkg.in/yaml.v3"
 )
 
 // syncHome is a sandbox home with a models.dev catalog that knows glm-4.6's
@@ -31,6 +32,10 @@ func syncHome(t *testing.T) string {
 	t.Setenv("DSH_HOME", "")
 	t.Setenv("OMO_CODING_AGENT_DIR", "")
 	t.Setenv("SENPI_CODING_AGENT_DIR", "")
+	t.Setenv("PI_CODING_AGENT_DIR", "")
+	t.Setenv("PI_CONFIG_DIR", "")
+	t.Setenv("OMP_PROFILE", "")
+	t.Setenv("PI_PROFILE", "")
 	noKeychain(t)
 	os.MkdirAll(filepath.Dir(catalog.CachePath()), 0o755)
 	os.WriteFile(catalog.CachePath(), []byte(`{"zai":{"models":{"glm-4.6":{"id":"glm-4.6","name":"GLM-4.6","limit":{"context":204800}}}}}`), 0o644)
@@ -99,6 +104,29 @@ func TestPiModelsCarryMaxTokens(t *testing.T) {
 	}
 }
 
+// An output limit above the model's window (models.dev lists deepseek-chat's
+// 384000 against 128000 of context) is cut to the window for every agent
+// magpie hands maxTokens; one whose window isn't known keeps its output.
+func TestMaxTokensWithinContextWindow(t *testing.T) {
+	syncHome(t)
+	check := func(limit, want string) {
+		t.Helper()
+		os.WriteFile(catalog.CachePath(), []byte(`{"zai":{"models":{"glm-4.6":{"id":"glm-4.6","name":"GLM-4.6","limit":{`+limit+`}}}}}`), 0o644)
+		catalog.Reset()
+		pi, _ := json.Marshal(magpieProviderJSON("pi"))
+		cline, _ := json.Marshal(clineModels(""))
+		omp, _ := yaml.Marshal(ompProvider())
+		dsh := strings.Join(dshProviderLines(true, ""), "\n")
+		if !strings.Contains(string(pi), `"maxTokens":`+want) || !strings.Contains(string(cline), `"maxTokens":`+want) ||
+			!strings.Contains(string(omp), "maxTokens: "+want) || !strings.Contains(dsh, "maxTokens: "+want) {
+			t.Fatalf("want maxTokens %s:\npi %s\ncline %s\nomp %s\ndsh %s", want, pi, cline, omp, dsh)
+		}
+	}
+	check(`"context":128000,"output":384000`, "128000")
+	check(`"output":384000`, "384000")
+	check(`"context":204800,"output":131072`, "131072")
+}
+
 // A provider added after a magpie model was picked reaches the lists agents
 // keep of magpie's models; a file magpie wrote nothing into stays as it is.
 func TestSyncCatalogRewritesAgentLists(t *testing.T) {
@@ -147,6 +175,7 @@ func TestSyncCatalogRewritesAgentLists(t *testing.T) {
 func TestSyncCatalogAgesCodexCache(t *testing.T) {
 	home := syncHome(t)
 	dir := filepath.Join(home, ".codex")
+	writeFile(t, filepath.Join(dir, "auth.json"), `{"tokens":{"access_token":"x","id_token":"x.e30.x"}}`)
 	writeFile(t, filepath.Join(dir, "config.toml"), "model = \"relay/glm-4.6\"\nopenai_base_url = \""+codexGatewayURL()+"\"\n")
 	cache := filepath.Join(dir, "models_cache.json")
 	writeFile(t, cache, `{"fetched_at":"2026-09-25T10:00:00Z","etag":"W/\"v1\"","client_version":"0.155.1","models":[{"slug":"gpt-5.5"}]}`)

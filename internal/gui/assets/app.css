@@ -148,7 +148,7 @@ code { font: 11.5px var(--code); }
 body.window.mac .top { padding-left: calc(96px / var(--zoom, 1)); height: calc(50px / var(--zoom, 1)); padding-top: calc(2px / var(--zoom, 1)); }
 body.window.mac .seg { top: calc(50% + 1px / var(--zoom, 1)); } /* 50% centres in the padding box; the 2px top padding puts the flex row a pixel lower */
 .brand { display: flex; align-items: center; gap: 6px; font-weight: 600; letter-spacing: .01em; }
-body.window:not(.mac):not(.linux) .brand { display: none; } /* Windows' title bar above already shows the icon and the name */
+body.window:not(.mac):not(.linux):not(.web) .brand { display: none; } /* Windows' title bar above already shows the icon and the name; a browser tab has no title bar of the app's */
 /* Linux: the header is the title bar, so it closes the window too — round,
    as GNOME draws its close button, and set a little apart from the icons */
 .icon.winclose { align-self: center; width: 22px; height: 22px; margin-left: 8px; border-radius: 50%; background: var(--pill); color: var(--fg-2); }
@@ -230,6 +230,8 @@ body.panel .seg { display: none; }
 .top.tight .update { width: 22px; padding: 0; justify-content: center; margin-right: 4px; }
 body.window .top.cramped .seg { position: relative; left: auto; top: auto; transform: none; margin: 0 auto; } /* relative still: its thumb sits in it, not over the whole header */
 .top.cramped .seg button { padding: 0 8px; }
+.top.crowded .seg button { padding: 0 6px; font-size: 12px; }
+.top.crowded .brand { display: none; }
 @keyframes update-in { from { opacity: 0; transform: translateY(-3px) scale(.94); } }
 @keyframes spin { to { transform: rotate(360deg); } }
 
@@ -876,6 +878,11 @@ body.panel .profiles #save { height: 25px; } /* the field's: the line keeps its 
 .resets-until { color: var(--faint); }
 .pq-use { margin-left: auto; flex: none; height: 20px; padding: 0 9px; border-radius: 999px; background: color-mix(in srgb, var(--fg) 7%, transparent); color: var(--fg-2); font-size: 11px; white-space: nowrap; transition: background .12s, color .12s; }
 .pq-use:hover { background: color-mix(in srgb, var(--fg) 12%, transparent); color: var(--fg); }
+/* spending a reset by itself, beside the button that spends one now */
+.pq-use.pq-auto { margin-left: auto; }
+.pq-auto + .pq-use { margin-left: 0; }
+.pq-use.pq-auto.on, .quota-resets .auto-reset.on { background: color-mix(in srgb, var(--accent) 16%, transparent); color: var(--accent); }
+.quota-resets .auto-reset + .text { margin-left: 0; }
 .pq-bals { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
 .pq-card.bal { grid-template-columns: minmax(0, 1fr); }
 .pq-bn { display: flex; align-items: center; gap: 6px; }
@@ -989,6 +996,11 @@ body.window .foot { padding-left: 18px; }
 .rail-item.on { color: var(--fg); background: transparent; }
 .rail-item .ic { width: 16px; height: 16px; transition: transform 220ms cubic-bezier(.22, 1, .36, 1); }
 .rail-item.on .ic { transform: scale(1.04); }
+/* a rail icon's name, drawn beside it (renderPickerRail's showRailTip) */
+.rail-tip { position: fixed; z-index: 31; top: 0; left: 0; transform: translate(-3px, -50%); padding: 3px 8px; border-radius: 6px; background: var(--fg); color: var(--bg); font-size: 11.5px; font-weight: 500; line-height: 16px; white-space: nowrap; max-width: 260px; overflow: hidden; text-overflow: ellipsis; pointer-events: none; opacity: 0; visibility: hidden; box-shadow: 0 2px 8px rgba(0, 0, 0, .18); transition: opacity 90ms ease-out, transform 140ms cubic-bezier(.22, 1, .36, 1), visibility 0s 90ms; }
+.rail-tip.left { transform: translate(3px, -50%); }
+.rail-tip.on { opacity: 1; visibility: visible; transform: translate(0, -50%); transition: opacity 90ms ease-out, transform 140ms cubic-bezier(.22, 1, .36, 1); }
+@media (prefers-reduced-motion: reduce) { .rail-tip, .rail-tip.on { transition: none; } }
 .rail-sep { width: 24px; height: 1px; margin: 2px 0; background: var(--line-2); flex: none; }
 .pop ul { list-style: none; overflow-y: auto; padding: 5px; min-width: 0; flex: 1 1 auto; contain: paint; }
 .pop li {
@@ -1307,9 +1319,17 @@ body.window .ag-sk-icon { width: 22px; height: 22px; border-radius: 6px; }
 .signing .acts .link { color: var(--fg-2); }
 .signing .devcode { display: flex; align-items: center; gap: 6px; margin: 6px 0 2px; }
 .signing .devcode code { font: 600 17px/1.2 var(--mono, ui-monospace, monospace); letter-spacing: .12em; padding: 4px 9px; border: 1px solid var(--line); border-radius: 7px; background: var(--card); user-select: all; }
+/* the sign-in link, one line, selected whole with a click */
+.signing .signlink { display: flex; align-items: center; gap: 4px; margin: 5px 0 1px; min-width: 0; }
+.signing .signlink code { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: 11px/1.3 var(--mono, ui-monospace, monospace); color: var(--fg-2); padding: 4px 7px; border: 1px solid var(--line); border-radius: 6px; background: var(--card); user-select: all; -webkit-user-select: all; cursor: text; }
 .signing .callback-form { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; margin-top: 6px; }
 .signing .callback-form input { flex: 1; min-width: 120px; width: 100%; padding: 6px 8px; border: 1px solid var(--line); border-radius: 7px; background: var(--card); color: var(--fg); font-size: 12px; }
 .signing .why { color: var(--red); }
+/* a plugin's ways to sign in: the question keeps the row, the choices
+   wrap beneath it at whatever length the plugin names them */
+.signing.plugin-ask { flex-wrap: wrap; }
+.signing.plugin-ask .choices { flex-basis: 100%; display: flex; flex-wrap: wrap; gap: 6px; }
+.signing.plugin-ask .choices button { height: auto; min-height: 26px; max-width: 100%; padding: 4px 10px; white-space: normal; text-align: left; line-height: 1.3; overflow-wrap: anywhere; }
 /* an import: what is pasted is sign-ins, so it is masked */
 .signing.import textarea { margin-top: 6px; width: 100%; box-sizing: border-box; padding: 6px 8px; border-radius: 7px; border: 1px solid var(--line); background: var(--card); color: var(--fg); font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; resize: vertical; outline: none; -webkit-text-security: disc; }
 .signing.import textarea:focus { border-color: var(--accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent); }
@@ -1427,6 +1447,9 @@ body.window .ag-sk-icon { width: 22px; height: 22px; border-radius: 6px; }
 .editor .side .text { padding: 3px 6px; }
 .editor .headers .pair .side .text { display: inline-flex; align-items: center; justify-content: center; width: 24px; height: 24px; padding: 0; border-radius: 6px; }
 .editor .stack { display: flex; flex-direction: column; gap: 6px; }
+.editor .move { align-items: flex-start; font-size: 12px; line-height: 1.5; padding-top: 4px; }
+.editor .move .hint { margin-top: 0; }
+.editor .move > button { padding-left: 0; padding-right: 0; }
 .editor .headers { display: flex; flex-direction: column; gap: 6px; align-items: flex-start; }
 .editor .headers .pair { width: 100%; }
 .editor .headers .hadds { display: flex; flex-wrap: wrap; gap: 2px 12px; }
@@ -1587,6 +1610,10 @@ input.words.rule-match { flex: 1 1 auto; width: auto; min-width: 0; }
 :root[data-theme="dark"] .warm-at input.at { color-scheme: dark; }
 @media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) .warm-at input.at { color-scheme: dark; } }
 @media (max-width: 520px) { .proxy-segs { flex-wrap: wrap; justify-content: flex-end; } }
+/* Settings → Plugins: what a plugin signs in to, or why it didn't load, said whole */
+.row.pref.plugin-row .sub, .row.pref.plugin-add .sub { white-space: normal; }
+.row.pref.plugin-row.off .name { color: var(--muted); }
+.row.pref.plugin-add .val { flex-wrap: wrap; justify-content: flex-end; }
 .prefs .val { display: inline-flex; align-items: center; gap: 2px; margin-left: auto; min-width: 0; max-width: 60%; flex: none; }
 .prefs .val code { font-size: 12px; color: var(--fg-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; user-select: text; -webkit-user-select: text; padding: 0 6px; }
 .prefs .val .text { padding: 3px 6px; }
@@ -1852,7 +1879,18 @@ body.window .row.agent .who.with-models { flex-wrap: wrap; row-gap: 0; }
 @media (hover: none) { .am-all { opacity: 1; } }
 .am-mr { display: flex; align-items: center; gap: 10px; width: calc(100% - 4px); height: 32px; margin: 0 2px; padding: 0 12px; border: 0; border-radius: 8px; background: none; color: var(--fg); font: inherit; font-size: 13px; text-align: left; cursor: pointer; transition: background-color .12s; }
 .am-mr:hover { background: var(--pill); }
+/* under its group: the model's icon in the group icon's column, past the
+   twisty, so the rows read as the group's */
+.am-rows .am-mr { padding-left: 28px; }
 .am-mr:focus-visible { outline: 1.5px solid var(--accent); outline-offset: -1.5px; }
+.am-mr .lg { flex: none; }
+.am-mr .lg > svg { color: var(--muted); }
+.am-mr.off .lg { opacity: .45; }
+/* a routing group's providers, discs as in a picker's field, in one width of slot, so the
+   names still start in a column */
+.am-g.routes .am-mr .lg { min-width: 56px; justify-content: flex-start; }
+.am-mr .ic-stack .disc { width: 17px; height: 17px; }
+.am-mr .ic-stack .disc > .ic { width: 11px !important; height: 11px !important; }
 .am-mr .n { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; transition: color .15s; }
 .am-mr .x { flex: none; font-size: 11.5px; color: var(--faint); font-variant-numeric: tabular-nums; }
 .am-mr .ck { flex: none; display: inline-flex; justify-content: center; width: 16px; color: var(--accent); }

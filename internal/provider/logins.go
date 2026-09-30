@@ -21,6 +21,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/yetone/magpie/internal/edit"
 	"github.com/yetone/magpie/internal/filememo"
 )
 
@@ -97,6 +98,10 @@ func readLogins() []savedLogin {
 	ls, _ := filememo.Read("logins", loginsPath(), func(b []byte) ([]savedLogin, error) {
 		var out []savedLogin
 		_ = json.Unmarshal(b, &out)
+		// DimAgent's accounts: magpie no longer signs in to it (DimAgent
+		// doesn't allow its subscription used outside its client), so one
+		// signed in before is left out, and gone from the file at its next write
+		out = slices.DeleteFunc(out, func(l savedLogin) bool { return l.Agent == "dimagent" })
 		return dedupeLogins(out), nil
 	})
 	return slices.Clone(ls) // callers change theirs
@@ -119,6 +124,10 @@ func writeLogins(ls []savedLogin) error {
 // writePrivate replaces a file readable by the user alone, atomically, so
 // an agent reading it at that moment sees either version, never half.
 func writePrivate(path string, b []byte) error {
+	path, err := edit.Target(path) // a symlink stays, its target written
+	if err != nil {
+		return err
+	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
 	}
@@ -335,8 +344,10 @@ func claudeSignedInUser(plan, statusPlan, status string) (user string, acct map[
 // none.
 func savedButSignedOut() []Exclusion {
 	saved := map[string]int{}
+	users := map[string][]string{}
 	for _, l := range readLogins() {
 		saved[l.Agent]++
+		users[l.Agent] = append(users[l.Agent], l.User)
 	}
 	var out []Exclusion
 	for _, a := range loginAgents {
@@ -354,7 +365,7 @@ func savedButSignedOut() []Exclusion {
 		if saved[a] > 1 {
 			n = fmt.Sprintf("%d accounts are", saved[a])
 		}
-		out = append(out, Exclusion{Agent: a, SignedOut: true,
+		out = append(out, Exclusion{Agent: a, SignedOut: true, Users: users[a],
 			Why: fmt.Sprintf("%s saved in magpie, but it isn't signed in here (%s), and they are only offered beside the account it is signed in to. Sign in (%s) with this HOME.", n, why, signIn)})
 	}
 	return out
@@ -469,6 +480,9 @@ func rememberLogins(force bool) {
 // Logins lists the remembered accounts of an agent ("" for every one),
 // the active one flagged.
 func Logins(agent string) []Login {
+	if pp, ok := pluginOfAgent(agent); ok {
+		return pluginLoginList(pp)
+	}
 	var side []Login
 	switch agent {
 	case "grok":
@@ -487,8 +501,6 @@ func Logins(agent string) []Login {
 		return cmdLoginList()
 	case "qoder":
 		return loginsOf(qoderLogins())
-	case "dimagent":
-		return dimagentLoginList()
 	case "zed":
 		return zedLoginList()
 	case "factory":
@@ -498,20 +510,23 @@ func Logins(agent string) []Login {
 	case "gemini", "antigravity":
 		return googleLoginList(agent)
 	case "":
-		side = append(grokLoginList(), copilotLoginList()...)
-		side = append(side, zcodeLoginList()...)
-		side = append(side, kiroLoginList()...)
-		side = append(side, devinLoginList()...)
-		side = append(side, wbLoginList(wbCN)...)
-		side = append(side, wbLoginList(wbAI)...)
-		side = append(side, cmdLoginList()...)
-		side = append(side, loginsOf(qoderLogins())...)
-		side = append(side, dimagentLoginList()...)
-		side = append(side, zedLoginList()...)
-		side = append(side, factoryLoginList()...)
-		side = append(side, mimoLoginList()...)
-		side = append(side, googleLoginList("gemini")...)
-		side = append(side, googleLoginList("antigravity")...)
+		// a built-in moved onto its plugin lists its accounts there (an
+		// agent's own sign-in, which the built-in still finds, too)
+		for _, b := range []struct {
+			id   string
+			list func() []Login
+		}{
+			{"grok", grokLoginList}, {"copilot", copilotLoginList}, {"zcode", zcodeLoginList}, {"kiro", kiroLoginList},
+			{"devin", devinLoginList}, {"workbuddy", func() []Login { return wbLoginList(wbCN) }},
+			{WorkBuddyAIID, func() []Login { return wbLoginList(wbAI) }}, {CommandCodePlanID, cmdLoginList},
+			{"qoder", func() []Login { return loginsOf(qoderLogins()) }}, {"zed", zedLoginList}, {"factory", factoryLoginList},
+			{MiMoID, mimoLoginList}, {"gemini", func() []Login { return googleLoginList("gemini") }},
+			{"antigravity", func() []Login { return googleLoginList("antigravity") }},
+		} {
+			if !Moved(b.id) {
+				side = append(side, b.list()...)
+			}
+		}
 	}
 	rememberLogins(false)
 	loginsMu.Lock()
@@ -539,11 +554,35 @@ func Logins(agent string) []Login {
 	return append(out, side...)
 }
 
+// InUseLogin is the account of an agent's the gateway goes to first: the
+// one the agent is signed in to, unless it is paused, else the first other
+// one on; "" when the agent has none.
+func InUseLogin(agent string) string {
+	return inUseOf(Logins(agent))
+}
+
+func inUseOf(ls []Login) string {
+	for _, l := range ls {
+		if l.Active && !l.Paused {
+			return l.User
+		}
+	}
+	for _, l := range ls {
+		if l.On && !l.Paused {
+			return l.User
+		}
+	}
+	return ""
+}
+
 // SwitchLogin signs an agent in to a remembered account. Sessions of the
 // agent that are already running keep the account they started with until
 // they restart; so does Codex's background app-server, which new Codex
 // sessions attach to (CodexDaemonStale says when it is).
 func SwitchLogin(agent, user string) error {
+	if pp, ok := pluginOfAgent(agent); ok {
+		return switchPluginLogin(pp, user)
+	}
 	switch agent {
 	case "grok":
 		return switchGrokLogin(user)
@@ -561,8 +600,6 @@ func SwitchLogin(agent, user string) error {
 		return switchCommandCodeLogin(user)
 	case "qoder":
 		return switchSideLogin("qoder", user, qoderLogins())
-	case "dimagent":
-		return switchDimAgentLogin(user)
 	case "zed":
 		return switchZedLogin(user)
 	case "factory":
@@ -686,6 +723,9 @@ func putClaudeLogin(l savedLogin) error {
 // ForgetLogin drops a remembered account. The one an agent is signed in to
 // now can't be forgotten; it would only be remembered again.
 func ForgetLogin(agent, user string) error {
+	if pp, ok := pluginOfAgent(agent); ok {
+		return forgetPluginLogin(pp, user)
+	}
 	switch agent {
 	case "grok":
 		return forgetGrokLogin(user)
@@ -703,8 +743,6 @@ func ForgetLogin(agent, user string) error {
 		return forgetCommandCodeLogin(user)
 	case "qoder":
 		return forgetQoderLogin(user)
-	case "dimagent":
-		return forgetDimAgentLogin(user)
 	case "zed":
 		return forgetZedLogin(user)
 	case "factory":

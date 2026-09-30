@@ -29,6 +29,12 @@ type groupJSON struct {
 	// Holds: the groups in it, at any depth — none of which can have it in
 	// turn
 	Holds []string `json:"holds"`
+	// Offers: the reasoning levels agents are offered for it; Shared: those
+	// its members have in common, which it offers unless it names its own
+	Offers []string `json:"offers"`
+	Shared []string `json:"shared"`
+	// Picked: the member a manual group sends every request to
+	Picked string `json:"picked,omitempty"`
 }
 
 type memberJSON struct {
@@ -130,7 +136,13 @@ func groupsState() groupsJSON {
 		}
 	}
 	for _, g := range provider.Groups() {
-		gj := groupJSON{Group: g, Info: []memberJSON{}, Holds: []string{}}
+		gj := groupJSON{Group: g, Info: []memberJSON{}, Holds: []string{}, Offers: []string{}, Shared: []string{}}
+		for _, e := range served {
+			if e.ID == provider.GroupPrefix+g.ID {
+				gj.Offers, gj.Shared = append(gj.Offers, e.Efforts...), append(gj.Shared, e.Shared...)
+				break
+			}
+		}
 		if _, ms, ok := provider.FindGroup(provider.GroupPrefix + g.ID); ok {
 			for _, m := range ms {
 				for _, v := range m.Groups() {
@@ -174,6 +186,12 @@ func groupsState() groupsJSON {
 				gj.Ready = true
 			}
 			gj.Info = append(gj.Info, m)
+		}
+		if g.Routing == provider.Manual {
+			// agents can pick it while the member picked can answer
+			gj.Picked = g.Picked()
+			i := slices.IndexFunc(gj.Info, func(m memberJSON) bool { return m.ID == gj.Picked })
+			gj.Ready = i >= 0 && gj.Info[i].Ready
 		}
 		out.Groups = append(out.Groups, gj)
 	}

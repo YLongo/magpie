@@ -34,7 +34,7 @@ func (m *model) reloadGroups() {
 	m.grow = clamp(m.grow, len(m.groups))
 }
 
-var routings = []string{"", provider.Ordered, provider.Rotate, provider.LeastUsed}
+var routings = []string{"", provider.Ordered, provider.Rotate, provider.LeastUsed, provider.Manual}
 
 func routingName(v string) string {
 	switch v {
@@ -44,8 +44,18 @@ func routingName(v string) string {
 		return "rotate"
 	case provider.LeastUsed:
 		return "least used"
+	case provider.Manual:
+		return "manual"
 	}
 	return "smart"
+}
+
+// groupRouting is how a group routes: a manual one names its pick.
+func groupRouting(g provider.Group) string {
+	if g.Routing == provider.Manual {
+		return "manual → " + g.Picked()
+	}
+	return routingName(g.Routing)
 }
 
 func staysName(v string) string {
@@ -402,6 +412,19 @@ func (m model) updateGroup(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				}, g.Name+" context "+dash(v))
 			}})
 		m.back = modeGroup
+	case "l":
+		in := newInput("e.g. low,medium,high,xhigh · empty for those its models share")
+		in.SetValue(strings.Join(g.Levels, ","))
+		m.openAsk(ask{crumbs: []string{"routing", g.Name, "levels"}, input: in, empty: true,
+			hint: "the reasoning levels agents are offered: " + strings.Join(provider.Levels, ", ") + "; a model without the one asked is sent its nearest",
+			onEnter: func(v string) tea.Cmd {
+				return saveGroup(g.ID, func(g *provider.Group) error {
+					var err error
+					g.Levels, err = provider.CleanLevels(strings.FieldsFunc(v, func(r rune) bool { return r == ',' || r == ' ' }))
+					return err
+				}, g.Name+" levels "+dash(v))
+			}})
+		m.back = modeGroup
 	case "R":
 		in := newInput("the group's new id")
 		in.SetValue(g.ID)
@@ -496,7 +519,7 @@ func (m model) viewGroups() string {
 			b.WriteString(line + "\n")
 			continue
 		}
-		notes := []string{fmt.Sprintf("%d model%s", len(g.Members), plural(len(g.Members))), routingName(g.Routing)}
+		notes := []string{fmt.Sprintf("%d model%s", len(g.Members), plural(len(g.Members))), groupRouting(g)}
 		if g.Affinity != "" {
 			notes = append(notes, staysName(g.Affinity))
 		}
@@ -524,9 +547,12 @@ func (m model) viewGroup() string {
 	var b strings.Builder
 	b.WriteString(m.header("routing", g.Name))
 	b.WriteString("\n\n")
-	head := []string{provider.GroupPrefix + g.ID, routingName(g.Routing), staysName(g.Affinity)}
+	head := []string{provider.GroupPrefix + g.ID, groupRouting(g), staysName(g.Affinity)}
 	if g.Context > 0 {
 		head = append(head, "context "+fmtTokens(g.Context))
+	}
+	if len(g.Levels) > 0 {
+		head = append(head, "levels "+strings.Join(g.Levels, "/"))
 	}
 	if g.Family != "" {
 		head = append(head, "family "+g.Family)

@@ -185,6 +185,10 @@ func reseatCmd(change func() error, done string) tea.Cmd {
 			return flashMsg{text: err.Error()}
 		}
 		for _, mv := range moved {
+			if mv.Error != "" {
+				done += "; " + mv.String()
+				continue
+			}
 			done += "; moved " + mv.String()
 		}
 		return flashMsg{text: done, ok: true}
@@ -679,6 +683,9 @@ func quotaLines(qs []provider.SubscriptionQuota, asked, left bool, width int, no
 			c := sText.Render("↺ " + r.Words())
 			if r.Until != nil {
 				c += sFaint.Render(" until " + provider.ResetClock(*r.Until, now))
+			}
+			if provider.AutoResets(q.Provider, q.User) {
+				c += sFaint.Render(" · auto") // spent by itself once the week is used up
 			}
 			cells = append(cells, c)
 		}

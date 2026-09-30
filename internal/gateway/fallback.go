@@ -16,6 +16,7 @@ package gateway
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"regexp"
 	"slices"
@@ -310,7 +311,11 @@ func planLevel(g provider.Group, ms []provider.Member, depth int, from provider.
 			}
 			all = append(all, cs...)
 		}
-		cs, wg := weigh(provider.Provider{ID: provider.GroupPrefix + g.ID, Routing: g.Routing}, all, "", from)
+		routing := g.Routing
+		if routing == provider.Manual {
+			routing = "" // the member picked, its keys or accounts weighed smartly
+		}
+		cs, wg := weigh(provider.Provider{ID: provider.GroupPrefix + g.ID, Routing: routing}, all, "", from)
 		for i, c := range cs {
 			m := of[c.seat()]
 			w := weighed(c, m.Provider, wg, false, from)
@@ -483,6 +488,33 @@ func passing(status int, header http.Header, again int) (time.Duration, bool) {
 	return 0, false
 }
 
+// matesFirst puts first, of the candidates left, the other keys or
+// accounts of the member c is of — its model, at its effort — that aren't
+// resting: what one account's safety filter refused, another may answer
+// (one verified for the vendor's trusted access), the same model before
+// the group's next (#248). A conversation kept on the account that
+// answered it last has that one alone first, and its member's other
+// accounts where the member is in the group: after Sonnet, first in it,
+// when Codex's gpt-6.1-sol refused.
+func matesFirst(left []candidate, c candidate) {
+	mate := func(x candidate) bool {
+		if x.p.ID != c.p.ID || x.model != c.model || x.effort != c.effort || x.who() == c.who() {
+			return false
+		}
+		_, resting := restOf(x.restKey())
+		return !resting
+	}
+	var mates, others []candidate
+	for _, x := range left {
+		if mate(x) {
+			mates = append(mates, x)
+		} else {
+			others = append(others, x)
+		}
+	}
+	copy(left, append(mates, others...))
+}
+
 // holdWriter keeps an error reply back while another provider may still
 // answer: headers and body wait until release, or are dropped for the next
 // try. Anything else goes straight through — but for a stream, only once
@@ -510,6 +542,10 @@ type holdWriter struct {
 	// — which another account or model may answer (#248)
 	refused bool
 	whole   bool // a reply that isn't streamed, held whole until release
+
+	// buffered: the vendor said it holds the reply back for safety checks,
+	// which may end in a refusal: held longer (holdBuffered)
+	buffered bool
 
 	ended bool   // the stream's last event was written: the reply is whole
 	tail  []byte // the end of the last write, for a marker split across two
@@ -601,6 +637,14 @@ const (
 	holdMost    = 1 << 20
 )
 
+// holdBuffered is how long a stream is held once the ChatGPT backend has
+// said it holds the reply back for extra safety checks (response.metadata,
+// safety_buffering): gpt-6.x at xhigh said nothing for 35s and then failed
+// with bio_policy, which went to Codex as its "This content can't be
+// shown" once 15s had let the stream through (#248). Codex waits 300s for
+// a stream's next event.
+const holdBuffered = 4 * time.Minute
+
 // scan reads the held stream's events so far: an error before any content
 // fails it; content, or waiting too long for it, lets it through.
 func (h *holdWriter) scan() {
@@ -614,6 +658,9 @@ func (h *holdWriter) scan() {
 		switch kind, status, msg := streamEvent(rest[:end]); kind {
 		case eventLead:
 			continue
+		case eventBuffering:
+			h.buffered = true
+			continue
 		case eventError:
 			h.failure, h.failMsg = status, msg
 			return
@@ -624,7 +671,11 @@ func (h *holdWriter) scan() {
 		h.flow()
 		return
 	}
-	if h.held.Len() > holdMost || time.Since(h.since) > holdLongest {
+	longest := holdLongest
+	if h.buffered {
+		longest = holdBuffered
+	}
+	if h.held.Len() > holdMost || time.Since(h.since) > longest {
 		h.flow()
 	}
 }
@@ -723,7 +774,8 @@ const (
 	eventContent = iota
 	eventLead    // what comes before a reply's content: a start, a ping
 	eventError
-	eventRefusal // the reply's end, by the vendor's safety filter
+	eventRefusal   // the reply's end, by the vendor's safety filter
+	eventBuffering // a lead saying the reply is held back for safety checks
 )
 
 // refusedStatus is what a refusal with nothing said is answered as: a
@@ -945,6 +997,15 @@ func streamEvent(ev []byte) (kind, status int, msg string) {
 		}
 	case typ == "ping", typ == "message_start", typ == "response.created", typ == "response.in_progress", typ == "response.queued":
 		return eventLead, 0, ""
+	case typ == "response.metadata":
+		// the ChatGPT backend's word on the turn, ahead of the reply: its
+		// safety buffering, moderation, a verification it recommends.
+		// Taken for content, it let the stream through, and the
+		// response.failed bio_policy after it went to Codex (#248)
+		if bytes.Contains(data, []byte(`"safety_buffering"`)) {
+			return eventBuffering, 0, ""
+		}
+		return eventLead, 0, ""
 	case strings.HasPrefix(typ, "codex."):
 		// the ChatGPT backend's word on the account (codex.rate_limits),
 		// ahead of the reply: taken for content, it let the stream
@@ -1146,4 +1207,52 @@ func streamStatus(msg string) int {
 		return 400
 	}
 	return 502
+}
+
+// pinTo is cands narrowed to the account a request names in AccountHeader
+// (its user, or its id in the routing trace), and pl with them. Nothing
+// else is tried in its place: a caller that names one account asks about
+// that one. The error says why none is left: no such account, one that
+// doesn't list the model, or one resting.
+func pinTo(want string, cands []candidate, pl planned) ([]candidate, planned, int, string) {
+	match := func(w Weighed) bool { return strings.EqualFold(want, w.Who) || want == w.ID }
+	var out []candidate
+	var order []Weighed
+	var rests []string
+	for i, c := range cands {
+		if i >= len(pl.order) || !match(pl.order[i]) {
+			continue
+		}
+		r, ok := restOf(c.restKey())
+		if !ok && c.restID() != c.restKey() {
+			r, ok = restOf(c.restID())
+		}
+		if ok {
+			rests = append(rests, fmt.Sprintf("%s rests until %s (%s)", c.label(), r.Until.Format(time.RFC3339), r.Why))
+			continue
+		}
+		out, order = append(out, c), append(order, pl.order[i])
+	}
+	if len(out) > 0 {
+		return out, planned{order: order}, 0, ""
+	}
+	if len(rests) > 0 {
+		return nil, pl, http.StatusTooManyRequests, AccountHeader + ": " + strings.Join(rests, "; ") + "; no other account is tried in its place"
+	}
+	for _, w := range pl.left {
+		if match(w) {
+			return nil, pl, http.StatusBadRequest, fmt.Sprintf("%s: %s's plan doesn't list %s", AccountHeader, w.Who, w.Model)
+		}
+	}
+	var have []string
+	for _, w := range append(slices.Clone(pl.order), pl.left...) {
+		if w.Kind == "account" && !slices.Contains(have, w.Who) {
+			have = append(have, w.Who)
+		}
+	}
+	msg := fmt.Sprintf("%s: no account %q serves this model", AccountHeader, want)
+	if len(have) > 0 {
+		msg += "; its accounts are " + strings.Join(have, ", ")
+	}
+	return nil, pl, http.StatusNotFound, msg
 }

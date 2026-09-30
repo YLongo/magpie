@@ -242,13 +242,44 @@
       c.onclick = (e) => {
         e.stopPropagation();
         const me = e.currentTarget;
-        const lit = [...me.parentElement.children].filter((x) => x.getAttribute("aria-pressed") === "true").map((x) => x.dataset.agent);
+        const lit = [...me.parentElement.children].filter((x) => x.dataset.agent && x.getAttribute("aria-pressed") === "true").map((x) => x.dataset.agent);
         const kept = on.filter((id) => !all.some((x) => x.id === id));
         onChange([...kept, ...(lit.includes(a.id) ? lit.filter((x) => x !== a.id) : [...lit, a.id])], me);
       };
       box.append(c);
     }
+    if (opts.all) allChip(box, all, on, onChange);
     return box;
+  }
+
+  // All, ahead of a row's chips: one click gives the item to every agent
+  // shown that can take it (not those a chip is greyed out for: no SSE, no
+  // remote server), and when they all have it, takes it from every one.
+  // An agent not shown keeps what it has, as with a chip.
+  function allChip(box, all, on, onChange) {
+    const can = [...box.children].filter((c) => !c.disabled).map((c) => c.dataset.agent);
+    if (can.length < 2) return;
+    const c = el("button", "lib-ag all", t("All"));
+    c.dataset.all = "1";
+    c.onclick = (e) => {
+      e.stopPropagation();
+      const me = e.currentTarget;
+      const lit = [...me.parentElement.children].filter((x) => x.dataset.agent && x.getAttribute("aria-pressed") === "true").map((x) => x.dataset.agent);
+      const kept = on.filter((id) => !all.some((x) => x.id === id));
+      onChange(can.every((id) => lit.includes(id)) ? kept : [...kept, ...new Set([...lit, ...can])], me);
+    };
+    box.prepend(c);
+    paintAll(box);
+  }
+  // the All chip shows whether every agent that can take the item has it
+  function paintAll(box) {
+    const c = box.querySelector(":scope > .lib-ag.all");
+    if (!c) return;
+    const can = [...box.children].filter((x) => x.dataset.agent && !x.disabled);
+    const n = can.length, full = can.every((x) => x.getAttribute("aria-pressed") === "true");
+    c.classList.toggle("on", full);
+    c.setAttribute("aria-pressed", full ? "true" : "false");
+    c.title = full ? t("Every agent that can take it has it — click to take it from all {n}", { n }) : t("Give it to all {n} agents that can take it", { n });
   }
 
   // A row's chips switched in place: the page isn't drawn again, which
@@ -264,14 +295,19 @@
   let refused = 0;           // when a row's write last failed, whose error another row's "Written" doesn't cover
   function chipsChange(path, name, list, rowOf) {
     return async (next, c) => {
-      const on = next.includes(c.dataset.agent);
-      c.classList.toggle("on", on);
-      c.classList.remove("via");
-      c.setAttribute("aria-pressed", on ? "true" : "false");
+      // All lights or darkens every chip of the row, a chip only itself
+      const every = !!c.dataset.all;
+      for (const x of every ? [...c.parentElement.children].filter((y) => y.dataset.agent) : [c]) {
+        const on = next.includes(x.dataset.agent);
+        x.classList.toggle("on", on);
+        if (on || x === c) x.classList.remove("via");
+        x.setAttribute("aria-pressed", on ? "true" : "false");
+      }
+      paintAll(c.parentElement);
       const key = path + "\n" + name;
       const w = writing.get(key);
-      if (w) { w.want = next; w.box = c.parentElement; take(lib); return; }
-      const me = { list, name, want: next, box: c.parentElement };
+      if (w) { w.want = next; w.box = c.parentElement; w.every = every; take(lib); return; }
+      const me = { list, name, want: next, box: c.parentElement, every };
       writing.set(key, me);
       take(lib);
       let sent = null, failed = false;
@@ -282,7 +318,8 @@
           sent = me.want;
           const v = await api("library/" + path, { name, agents: sent });
           take(v);
-          if (same() && Date.now() - refused > 6000) report(v.result);
+          if (same() && me.every && Date.now() - refused > 6000) { reportAll(v, me); continue; }
+          if (same() && Date.now() - refused > 6000) report(v.result, null, sent);
         }
       } catch (e) {
         failed = true;
@@ -299,13 +336,41 @@
       else if (fresh && !morphChips(me.box, fresh)) me.box.replaceWith(fresh);
     };
   }
+  // What All did, said of the item: on for how many of the agents it went
+  // to, and which of them couldn't be given it, and why.
+  function reportAll(v, me) {
+    const what = (me.list === "servers" ? "mcp:" : "skill:") + me.name;
+    const shown = [...me.box.children].filter((x) => x.dataset.agent && !x.disabled).map((x) => x.dataset.agent);
+    const n = shown.filter((id) => me.want.includes(id)).length;
+    const bad = (v.result?.problems || []).filter((p) => p.what === what && shown.includes(p.agent));
+    if (!bad.length) {
+      status(n ? t("{name} is on for all {n} agents", { name: me.name, n }) : t("{name} is off for every agent", { name: me.name }), "ok");
+      return;
+    }
+    const p = bad[0];
+    status((n ? t("{name} is on for {ok} of {n} agents", { name: me.name, ok: n - bad.length, n }) : t("{name} couldn't be taken from every agent", { name: me.name })) + " — "
+      + t("{agent}: {error}", { agent: nameOf(p.agent), error: p.error }) + (bad.length > 1 ? " " + t("(and {n} more)", { n: bad.length - 1 }) : ""), "warn", 8000);
+  }
+
   // take is the page as magpie answered it, with the rows still being
-  // written kept as they were last clicked
+  // written kept as they were last clicked. A server or skill added,
+  // removed or renamed changes what the market calls added (#300): one gone
+  // from the library loses its mark at once, and the market is asked again.
   function take(v) {
+    const was = lib && shelf();
     lib = v;
     for (const w of writing.values()) {
       const x = lib[w.list].find((y) => y.name === w.name);
       if (x) x.agents = w.want;
+    }
+    if (!was || shelf() === was) return;
+    for (const [kind, list] of [["mcp", lib.servers], ["skills", lib.skills]]) {
+      const m = market[kind];
+      if (!m.items) continue;
+      const names = new Set((list || []).map((x) => x.name));
+      for (const x of m.items) if (x.have && !names.has(x.have)) x.have = "";
+      drawMarket(kind);
+      fetchMarket(kind);
     }
   }
   function morphChips(box, fresh) {
@@ -357,7 +422,9 @@
       return false;
     }
   }
-  function report(res, done) {
+  // given, for a row's agent chips, is the agents that have it now: an
+  // agent written that isn't one of them had it taken out (#332).
+  function report(res, done, given) {
     if (!res) return;
     if (res.problems?.length) {
       const p = res.problems[0];
@@ -365,7 +432,10 @@
       return;
     }
     const n = res.changed?.length || 0;
+    const out = given ? (res.changed || []).filter((id) => !given.includes(id)).length : 0;
     if (done) status(done, "ok");
+    else if (out && out === n) status(n === 1 ? t("Removed from {agent}", { agent: nameOf(res.changed[0]) }) : t("Removed from {n} agents", { n }), "ok");
+    else if (out) status(t("{n} agents updated", { n }), "ok");
     else if (n) status(n === 1 ? t("Written to {agent}", { agent: nameOf(res.changed[0]) }) : t("Written to {n} agents", { n }), "ok");
     else status(t("Saved — the agents already had it"), "ok");
   }
@@ -388,7 +458,20 @@
       const li = el("li");
       const who = p.what.startsWith("project:") ? tilde(p.agent) : p.agent ? nameOf(p.agent) : "";
       if (who) li.append(el("b", "", who), el("span", "lib-problems-sep", " · "));
-      li.append(el("span", "", problemWhat(p.what)), el("span", "lib-problems-err", p.error));
+      // an agent's own skill in the library's way is settled right here:
+      // the library's in its place (the agent's kept aside), or the agent's
+      const own = p.own && p.what.startsWith("skill:") && p.agent;
+      const name = own && p.what.slice("skill:".length);
+      li.append(el("span", "", problemWhat(p.what)), el("span", "lib-problems-err", own ? t("{agent} has a skill of its own called {name}, not the same as the library's", { agent: who, name }) : p.error));
+      if (own) {
+        const fix = el("div", "lib-problems-fix");
+        const use = button(t("Use the library's"), "action", () => change("skills/use-library", { name, agent: p.agent }, t("{agent} has the library's {name} now; its own is kept with the backups", { agent: who, name })));
+        use.title = t("Sets {agent}'s own {name} aside with the backups and gives it the library's in its place", { agent: who, name });
+        const keep = button(t("Keep {agent}'s", { agent: who }), "action", () => change("skills/keep-own", { name, agent: p.agent }, t("{agent} keeps its own {name}", { agent: who, name })));
+        keep.title = t("{agent} keeps its own {name}, and the library no longer gives it this skill", { agent: who, name });
+        fix.append(use, keep);
+        li.append(fix);
+      }
       ul.append(li);
     }
     card.append(ttl, ul);
@@ -1003,7 +1086,7 @@
     sub.title = serverLine(s);
     who.append(sub);
     row.append(mark(s.icon, s.transport === "stdio" ? GLYPH.cmd : GLYPH.web), who,
-      agentChips(all, s.agents, chipsChange("servers/agents", s.name, "servers", (x) => serverRow(x, all)), { problems: s.problems, blocked: sseBlocked(s) }));
+      agentChips(all, s.agents, chipsChange("servers/agents", s.name, "servers", (x) => serverRow(x, all)), { problems: s.problems, blocked: sseBlocked(s), all: true }));
     row.onclick = () => editServer(s);
     row.title = t("Edit {name}", { name: s.name });
     return row;
@@ -1174,7 +1257,7 @@
       if (d.transport === "stdio") Object.assign(body.server, { command: d.command, args: d.args, env: d.env });
       else Object.assign(body.server, { url: d.url, headers: d.headers });
       try {
-        lib = await api("library/servers/save", body);
+        take(await api("library/servers/save", body));
         report(lib.result, s ? t("{name} saved", { name: d.name }) : "");
         closeLibModal();
         render();
@@ -1245,9 +1328,9 @@
       for (const f of found.filter((x) => pick.has(x.name))) {
         try {
           last = await api("library/servers/save", { old: "", server: { ...f, agents: who.filter((id) => reaches(f)(agentOf(id))) } });
-        } catch (e) { err.textContent = f.name + ": " + e.message; go.disabled = false; if (last) { lib = last; render(); } return; }
+        } catch (e) { err.textContent = f.name + ": " + e.message; go.disabled = false; if (last) { take(last); render(); } return; }
       }
-      lib = last;
+      take(last);
       report(lib.result, t("Added {n} servers", { n: pick.size }));
       closeLibModal();
       render();
@@ -1308,6 +1391,19 @@
     if (lib.foundSkills.length) {
       const rh = el("div", "row-head");
       rh.append(el("span", "label", t("In your agents")), el("span", "grow"), el("span", "note", t("not in the library — bring one in to give it to the others")));
+      // every one at once, rather than a click for each
+      if (lib.foundSkills.length > 1) {
+        const names = lib.foundSkills.map((f) => f.name);
+        const all = button(t("Bring in all"), "action lib-updall lib-importall", async (e, b) => {
+          b.classList.add("busy");
+          b.textContent = t("Bringing in…");
+          await importAllSkills(names);
+          b.classList.remove("busy");
+          b.textContent = t("Bring in all");
+        });
+        all.title = t("Brings the {n} skills into the library: the agents that have them go on having them, and you can give them to the others", { n: names.length });
+        rh.append(all);
+      }
       body.append(rh);
       const list = el("div", "list lib-list");
       for (const f of lib.foundSkills) list.append(foundSkillRow(f));
@@ -2045,6 +2141,23 @@
     }
   }
 
+  // Every skill found in the agents brought in at once: one that couldn't be
+  // is said, and the others are brought in all the same.
+  async function importAllSkills(names) {
+    try {
+      const v = await api("library/skills/import-all", { names });
+      take(v);
+      const res = v.result || {}, no = res.unimported || [];
+      if (no.length) {
+        const p = no[0];
+        status(t("{name} wasn't brought in: {error}", { name: p.what.replace(/^skill:/, ""), error: p.error }) + (no.length > 1 ? " " + t("(and {n} more)", { n: no.length - 1 }) : ""), "warn", 8000);
+      } else report(res, t("{n} skills are in the library now", { n: names.length }));
+      render();
+    } catch (e) {
+      status(e.message, "err", 6000);
+    }
+  }
+
   // Which skills GitHub changed since they were installed: each row says,
   // and the heading offers to update just those.
   async function checkSkills() {
@@ -2236,7 +2349,7 @@
     rm.append(svg(GLYPH.trash, 13, 1.4));
     rm.title = t("Remove");
     acts.append(rm);
-    row.append(mark(s.icon, GLYPH.skill), who, acts, agentChips(all, s.agents, chipsChange("skills/agents", s.name, "skills", (x) => skillRow(x, all)), { problems: s.problems, via: viaFor(s) }), projectCount(s));
+    row.append(mark(s.icon, GLYPH.skill), who, acts, agentChips(all, s.agents, chipsChange("skills/agents", s.name, "skills", (x) => skillRow(x, all)), { problems: s.problems, via: viaFor(s), all: true }), projectCount(s));
     row.onclick = () => viewSkill(s);
     row.title = t("Read {name}'s SKILL.md", { name: s.name });
     return row;
@@ -2287,13 +2400,15 @@
     if (f.shared) { const src = el("div", "lib-src"); src.append(el("span", "", t("shared in")), pathLink(f.shared)); who.append(src); }
     if (f.link) { const src = el("div", "lib-src"); src.append(el("span", "", t("linked from")), pathLink(f.link)); who.append(src); }
     const have = el("div", "lib-have");
-    for (const id of f.agents) { const a = agentOf(id); if (a) { const i = agentIcon(a.icon); i.title = a.name; have.append(i); } }
+    // an agent with a copy of the very same files has it as much as one
+    // with the folder itself: it isn't said to differ
+    for (const id of [...f.agents, ...(f.copies || [])]) { const a = agentOf(id); if (a) { const i = agentIcon(a.icon); i.title = f.agents.includes(id) ? a.name : a.name + " — " + t("{agents} has the very same files; bringing it in gives it the library's, its copy kept with the backups", { agents: a.name }); have.append(i); } }
     row.append(glyph(GLYPH.skill), who, have);
     if (f.others?.length) row.append(tag(t("differs in {agents}", { agents: f.others.map(nameOf).join(", ") }), "warn", t("{agents} has another skill by this name; bringing this one in leaves that one as it is", { agents: f.others.map(nameOf).join(", ") })));
     const b = button(t("Bring in"), "action", () => change("skills/import", { name: f.name }, t("{name} is in the library now", { name: f.name })));
     b.title = f.shared ? t("Keeps it where it is in the shared skills folder and links to it: you can give it to any agent")
-      : f.link ? t("Keeps a link to where it is: {agents} go on having it, and you can give it to the others", { agents: f.agents.map(nameOf).join(", ") })
-      : t("Moves it into the library and links it back: {agents} go on having it, and you can give it to the others", { agents: f.agents.map(nameOf).join(", ") });
+      : f.link ? t("Keeps a link to where it is: {agents} go on having it, and you can give it to the others", { agents: [...f.agents, ...(f.copies || [])].map(nameOf).join(", ") })
+      : t("Moves it into the library and links it back: {agents} go on having it, and you can give it to the others", { agents: [...f.agents, ...(f.copies || [])].map(nameOf).join(", ") });
     row.append(b);
     return row;
   }
@@ -2495,7 +2610,7 @@
     const body = { id: x.id, values };
     if (agents) body.agents = agents;
     const ok = await change("market/server", body, t("{name} is in the library now", { name: x.title || x.name }));
-    if (ok) { x.have = x.name; drawMarket("mcp"); fetchMarket("mcp"); }
+    if (ok) { x.have = x.name; drawMarket("mcp"); } // take asked the market again
     return ok;
   }
 
@@ -2596,7 +2711,7 @@
     const body = { source: x.source, id: x.skillId };
     if (agents) body.agents = agents;
     const ok = await change("market/skill", body, t("{name} is in the library now", { name: x.name }));
-    if (ok) { x.have = x.name; drawMarket("skills"); fetchMarket("skills"); }
+    if (ok) { x.have = x.name; drawMarket("skills"); } // take asked the market again
     return ok;
   }
 
@@ -2659,12 +2774,10 @@
   // in another window or through the CLI meanwhile. Not over an open dialog,
   // unsaved text, or a lookup under way.
   page.addEventListener("scroll", () => page.querySelector(".lib-head")?.classList.toggle("stuck", page.scrollTop > 0), { passive: true });
-  // What changed there changes what the market calls added, too.
+  // What changed there changes what the market calls added, too: take asks it again.
   async function quietLoad() {
     if (page.hidden || modal || dirty() || probing) return;
-    const was = shelf();
     await load(true);
-    if (shelf() !== was) for (const kind of ["mcp", "skills"]) if (market[kind].items) fetchMarket(kind);
   }
   const shelf = () => JSON.stringify([lib?.servers?.map((x) => x.name), lib?.skills?.map((x) => x.name)]);
   document.addEventListener("visibilitychange", () => { if (!document.hidden) quietLoad(); });

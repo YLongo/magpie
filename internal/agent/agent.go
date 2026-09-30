@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"sort"
 	"strings"
@@ -70,6 +71,11 @@ type Agent struct {
 	// rather than asking the gateway, rewrites that list as the catalog is
 	// now — where magpie wrote one; nothing else changes (see SyncCatalog).
 	Sync func() error
+	// RenameRefs, for an agent whose config names magpie's models beyond
+	// its fields (omp's other roles and fallback chains), moves those names
+	// off provider from onto to, the rest of each kept; it answers whether
+	// any moved. The fields themselves are RenameProvider's.
+	RenameRefs func(from, to string) (bool, error)
 	// Check, for an agent magpie wires in beyond its model field, says what
 	// of that wiring is gone while the model is still one of magpie's —
 	// something else rewrote the config — or "" when it is all there
@@ -86,6 +92,11 @@ type Agent struct {
 	// WSL is the distro an agent inside WSL lives in, "" for this
 	// machine's own (see wsl.go).
 	WSL string
+	// Home is a WSL agent's $HOME in its distro as magpie opens it
+	// (\\wsl.localhost\<distro>\home\me), where its other files are; ""
+	// for this machine's, and while the distro is stopped: opening it
+	// would start it.
+	Home string
 	// Import, for an app that takes magpie only through an import link of
 	// its own, which the user confirms there (Cindy), is that link; the app
 	// has no fields magpie sets. Added says whether it has magpie already.
@@ -119,13 +130,16 @@ func (a *Agent) Detected() bool {
 	if a.detect != nil {
 		return a.detect()
 	}
+	// a file where the agent keeps its folder is another tool's (a shell's
+	// ~/.dsh), and the agent can't be here: it couldn't make its folder
+	if a.Dir != "" && Taken(a.Dir) {
+		return false
+	}
 	if _, err := os.Stat(a.Path); err == nil {
 		return true
 	}
-	if a.Dir != "" {
-		if _, err := os.Stat(a.Dir); err == nil {
-			return true
-		}
+	if a.Dir != "" && isDir(a.Dir) {
+		return true
 	}
 	if a.Bin != "" {
 		if _, err := exec.LookPath(a.Bin); err == nil {
@@ -133,6 +147,21 @@ func (a *Agent) Detected() bool {
 		}
 	}
 	return false
+}
+
+// Taken reports whether something that isn't a folder is where the folder
+// p, or one it is in, would be: nothing can be written under it.
+func Taken(p string) bool {
+	for d := filepath.Clean(p); ; {
+		if st, err := os.Stat(d); err == nil {
+			return !st.IsDir()
+		}
+		up := filepath.Dir(d)
+		if up == d {
+			return false
+		}
+		d = up
+	}
 }
 
 // goProgram reports whether bin was built by Go: another tool of the same

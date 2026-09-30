@@ -95,6 +95,16 @@ type providerJSON struct {
 	Sponsored bool               `json:"sponsored"`
 	KeyList   []provider.KeyInfo `json:"keyList"`           // its keys, in the order requests try them
 	Account   *accountJSON       `json:"account,omitempty"` // a signed-in agent, see provider.Account
+	// Move is where a built-in subscription stands with the community
+	// plugin that can run it (provider.Move): set for those that have one
+	Move *moveJSON `json:"move,omitempty"`
+}
+
+type moveJSON struct {
+	Package string `json:"package"`
+	// State is "" (built-in, never moved), "plugin", "back" or "failed"
+	State string `json:"state"`
+	Error string `json:"error,omitempty"`
 }
 
 // stepPlanJSON: whether a StepFun provider's platform sign-in is kept, and
@@ -165,6 +175,11 @@ type providersJSON struct {
 	// signed in to after Codex was switched to another; "" when none is
 	// left behind (provider.CodexDaemonStale).
 	CodexDaemon string `json:"codexDaemon,omitempty"`
+	// Plugins are the providers the plugins sign in to, for the add sheet
+	Plugins []pluginSubJSON `json:"plugins"`
+	// OnPlugins are the built-in subscriptions moved onto their plugins,
+	// which the add sheet offers as the plugin's alone
+	OnPlugins []string `json:"onPlugins,omitempty"`
 	// Moved is the agents the change moved off models it stopped serving
 	// (agent.Reseat), for the page to say so.
 	Moved []agent.Move `json:"moved,omitempty"`
@@ -236,6 +251,13 @@ func providerInfo(p provider.Provider, agents []agentUse) providerJSON {
 	}
 	out.Key.Set = p.Key != ""
 	out.Key.Masked = provider.Mask(p.Key)
+	if provider.Movable(p.ID) {
+		m, _ := provider.MigrationOf(p.ID)
+		out.Move = &moveJSON{Package: provider.MovePackage(p.ID), State: m.State, Error: m.Err}
+		if m.State == provider.MoveMoving {
+			out.Move.State = ""
+		}
+	}
 	out.KeyList = p.KeyList()
 	if out.KeyList == nil {
 		out.KeyList = []provider.KeyInfo{}
@@ -269,6 +291,15 @@ func providerInfo(p provider.Provider, agents []agentUse) providerJSON {
 			out.Account.Name, out.Account.Icon = "Command Code", "commandcode"
 		}
 		out.Account.Logins = provider.Logins(a.Agent)
+		if pp, ok := provider.PluginOf(p.ID); ok && p.IsPlugin() {
+			// a plugin's sign-in: named for the provider it signs in to,
+			// the page following it by the provider's id
+			out.Account.Agent, out.Account.Name, out.Account.Icon = p.ID, pp.Name, pluginIcon(pp.Spec, pp.ID)
+			out.Account.Logins = provider.Logins(p.ID)
+			if out.Icon == "" || out.Icon == "generic" {
+				out.Icon = out.Account.Icon
+			}
+		}
 	}
 	exposed := map[string]bool{}
 	for _, m := range p.Exposed() {
@@ -346,6 +377,7 @@ func providersState() providersJSON {
 	provider.FetchNew(8 * time.Second)
 	agents := agent.Detected()
 	s := providersJSON{Providers: []providerJSON{}, Presets: []presetJSON{}, Excluded: []excludedJSON{}}
+	s.OnPlugins = provider.OnPlugins()
 	for _, x := range provider.Excluded() {
 		e := excludedJSON{Exclusion: x, Name: x.Agent, Icon: "generic"}
 		if a, err := agent.Find(x.Agent); err == nil {
@@ -388,6 +420,7 @@ func providersState() providersJSON {
 		s.Gateway.Running, s.Gateway.Window = gateway.Serving()
 	}
 	s.CodexDaemon = provider.CodexDaemonStale()
+	s.Plugins = pluginSubs()
 	return s
 }
 
@@ -407,6 +440,7 @@ func ago(t time.Time) string {
 
 func providerRoutes(mux *http.ServeMux, w Windows) {
 	importAppsRoutes(mux)
+	pluginRoutes(mux, w)
 	traceRoutes(mux)
 	groupRoutes(mux)
 	mux.HandleFunc("GET /api/providers", func(rw http.ResponseWriter, r *http.Request) {
@@ -508,6 +542,17 @@ func providerRoutes(mux *http.ServeMux, w Windows) {
 		case "show":
 			// a signed-in account the user removed, back with its picks
 			if err := provider.ShowAccount(in.ID); err != nil {
+				fail(rw, err)
+				return
+			}
+		case "move":
+			// a built-in subscription's accounts onto its community plugin
+			if err := provider.Move(r.Context(), in.ID); err != nil {
+				fail(rw, err)
+				return
+			}
+		case "moveback":
+			if err := provider.MoveBack(r.Context(), in.ID); err != nil {
 				fail(rw, err)
 				return
 			}

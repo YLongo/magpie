@@ -53,6 +53,9 @@ type SignInState struct {
 	Code          string `json:"code,omitempty"`          // what to type there, for a device code
 	State         string `json:"state"`                   // installing, waiting, done, failed or canceled
 	PasteCallback bool   `json:"pasteCallback,omitempty"` // a callback URL can also finish this sign-in
+	// PasteCode is a plugin's sign-in finished by the code its page shows
+	PasteCode    bool   `json:"pasteCode,omitempty"`
+	Instructions string `json:"instructions,omitempty"` // a plugin's words for its page
 	// Installing is the CLI being installed before the sign-in can start
 	Installing string `json:"installing,omitempty"`
 	User       string `json:"user,omitempty"`  // the account, once done
@@ -62,18 +65,17 @@ type SignInState struct {
 }
 
 type signInFlow struct {
-	mu                sync.Mutex
-	st                SignInState
-	verifier          string
-	state             string
-	redirect          string
-	srv               *http.Server
-	stop              func() // ends an agent's own login command, when that is the sign-in
-	kiro              *kiroFlow
-	dimagentDone      chan dimagentCallback
-	dimagentSubmitted bool
-	site              string // where to sign in, for an agent with more than one (ZCode: "zai" or "bigmodel")
-	done              chan struct{}
+	mu       sync.Mutex
+	st       SignInState
+	verifier string
+	state    string
+	redirect string
+	srv      *http.Server
+	stop     func() // ends an agent's own login command, when that is the sign-in
+	kiro     *kiroFlow
+	site     string // where to sign in, for an agent with more than one (ZCode: "zai" or "bigmodel")
+	plugin   string // a plugin's sign-in session, finished with the code pasted back
+	done     chan struct{}
 }
 
 var signIns = struct {
@@ -266,11 +268,6 @@ func (s *signInFlow) begin() error {
 		if err := startQoderSignIn(s); err != nil {
 			return err
 		}
-	case "dimagent":
-		// DimAgent's OAuth + PKCE, on the callback port its client registered
-		if err := startDimAgentSignIn(s); err != nil {
-			return err
-		}
 	case "zed":
 		// Zed's own sign-in: zed.dev sends the browser back to a port magpie
 		// listens on, with the account's token encrypted to magpie's key
@@ -356,7 +353,9 @@ func CancelSignIn(id string) {
 }
 
 // SubmitSignInCallback finishes a browser sign-in whose callback could not
-// reach this machine. Invalid input leaves the pending sign-in open to retry.
+// reach this machine, or a plugin's with the code its page showed. No
+// built-in sign-in takes a callback now (PasteCallback is never set); the
+// route and the page's field stay for one that will.
 func SubmitSignInCallback(id, raw string) error {
 	signIns.Lock()
 	s, ok := signIns.m[id]
@@ -364,11 +363,10 @@ func SubmitSignInCallback(id, raw string) error {
 	if !ok {
 		return errors.New("no such sign-in")
 	}
-	got, err := dimAgentCallbackFromPaste(raw)
-	if err != nil {
-		return err
+	if s.plugin != "" {
+		return s.pluginCode(raw)
 	}
-	return s.submitDimAgentCallback(got)
+	return errors.New("this sign-in can't be finished from a pasted address")
 }
 
 // WaitSignIn blocks until a sign-in is over, for the command line.

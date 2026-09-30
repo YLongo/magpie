@@ -25,12 +25,14 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/yetone/magpie/internal/catalog"
+	"github.com/yetone/magpie/internal/plugin"
 	"github.com/yetone/magpie/internal/proc"
 )
 
@@ -78,6 +80,12 @@ type Account struct {
 	// explain adds what the user can do about a refusal the account's
 	// backend answered, "" when there is nothing to add (factory.go).
 	explain func(status int, body []byte) string
+
+	// plugin is set on a plugin's provider (plugins.go), and transport
+	// carries its requests: the plugin's fetch.
+	plugin    *plugin.Provider
+	pluginKey string // the account's key in plugin-auth.json
+	transport func(req *http.Request) (*http.Response, error)
 }
 
 // APIs lists the APIs model is served on, as the provider's last model
@@ -85,6 +93,9 @@ type Account struct {
 // Claude models on Chat and Anthropic's. nil is not known, and every API
 // the provider speaks may be tried.
 func (p Provider) APIs(model string) []Protocol {
+	if p.IsPlugin() {
+		return p.pluginAPIs(model)
+	}
 	ms, _, _ := catalog.Live(p.ID)
 	for _, m := range ms {
 		if m.ID == model && len(m.APIs) > 0 {
@@ -192,6 +203,9 @@ type Exclusion struct {
 	// SignedOut: the agent has accounts saved in magpie but isn't signed
 	// in where magpie looks, and so none of them is offered.
 	SignedOut bool `json:"signedOut,omitempty"`
+	// Users names those saved accounts (no secrets), so they can be
+	// removed from magpie while none of them is offered.
+	Users []string `json:"users,omitempty"`
 	// Quiet: the user asked not to be reminded of it; only the Add sheet
 	// offers it back.
 	Quiet bool `json:"quiet,omitempty"`
@@ -815,9 +829,6 @@ func Accounts() []Provider {
 	if p, ok := qoderAccount(); ok {
 		out = append(out, p)
 	}
-	if p, ok := dimagentAccount(); ok {
-		out = append(out, p)
-	}
 	if p, ok := zedAccount(); ok {
 		out = append(out, p)
 	}
@@ -832,7 +843,9 @@ func Accounts() []Provider {
 			out = append(out, p)
 		}
 	}
-	return out
+	// a built-in moved onto its plugin is the plugin's now (migrate.go)
+	out = slices.DeleteFunc(out, func(p Provider) bool { return Moved(p.ID) })
+	return append(out, pluginAccounts()...)
 }
 
 func readJSON(path string, v any) bool {
@@ -1225,6 +1238,7 @@ var copilotInternal = regexp.MustCompile(`^(copilot-search|exec-agent|trajectory
 var (
 	copilotTermsMu sync.Mutex
 	copilotTerms   = map[string]map[string]bool{} // by GitHub token: models whose terms wait
+	copilotPicks   = map[string][]string{}        // by GitHub token: models it may pick by hand, in the list's order
 )
 
 // copilotAccept enables model for the account when its terms still wait.
@@ -1321,6 +1335,7 @@ func copilotModels(ctx context.Context, app copilotApp) ([]catalog.Model, error)
 		return nil, errors.New("Copilot models: " + APIError(b, res.Status))
 	}
 	var out []catalog.Model
+	var picks []string
 	waiting := map[string]bool{}
 	copilotSeenMu.Lock()
 	for _, m := range v.Data {
@@ -1339,6 +1354,7 @@ func copilotModels(ctx context.Context, app copilotApp) ([]catalog.Model, error)
 		}
 		switch {
 		case m.Policy != nil && m.Policy.State == "enabled", m.Policy == nil && m.Picker:
+			picks = append(picks, m.ID)
 		case m.Policy != nil && m.Policy.Terms != "":
 			waiting[m.ID] = true
 		default:
@@ -1352,6 +1368,7 @@ func copilotModels(ctx context.Context, app copilotApp) ([]catalog.Model, error)
 	out = append(out, copilotAutoModel)
 	copilotTermsMu.Lock()
 	copilotTerms[app.Token] = waiting
+	copilotPicks[app.Token] = picks
 	copilotTermsMu.Unlock()
 	return out, nil
 }
