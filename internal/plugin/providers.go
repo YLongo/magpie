@@ -4,11 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/yetone/magpie/internal/settings"
 )
@@ -18,6 +20,20 @@ import (
 type Method struct {
 	Type  string `json:"type"`
 	Label string `json:"label"`
+	// Placeholder is the hint an "api" method gives in its key's field
+	// (magpie's own field: OpenCode's says "API key")
+	Placeholder string `json:"placeholder,omitempty"`
+}
+
+// KeyTitle is what an "api" method's key is asked as: its label, as
+// OpenCode's dialog titles it, unless that only says "API key" (or
+// nothing), when it is name's API key.
+func (m Method) KeyTitle(name string) string {
+	l := strings.TrimSpace(m.Label)
+	if l == "" || strings.EqualFold(l, "API key") {
+		return name + " API key"
+	}
+	return l
 }
 
 // Model is a model a plugin's provider serves, as OpenCode lists it.
@@ -34,10 +50,16 @@ type Model struct {
 	Image     bool     `json:"image"`
 	Released  string   `json:"released"`
 	Variants  []string `json:"variants"`
-	Cost      *struct {
+	// Free is set by the plugin on a model the plan serves at no cost to
+	// its allowance (WorkBuddy's "credits": "x0.00")
+	Free bool `json:"free"`
+	Cost *struct {
 		Input  float64 `json:"input"`
 		Output float64 `json:"output"`
 	} `json:"cost"`
+	// ImageSaid is whether the plugin (or models.dev) said if it takes
+	// images: Image false without it is not known
+	ImageSaid bool `json:"imageSaid"`
 }
 
 // Provider is a provider a plugin signs in to.
@@ -48,6 +70,9 @@ type Provider struct {
 	NPM     string   `json:"npm"`
 	API     string   `json:"api"`
 	Methods []Method `json:"methods"`
+	// Icon is the picture the plugin gives the provider, as it said it:
+	// an https URL or a data:image URI (internal/provider keeps it)
+	Icon string `json:"icon,omitempty"`
 	// Usage says the plugin tells each account's allowance (auth.usage)
 	Usage     bool    `json:"usage"`
 	SignedIn  bool    `json:"signedIn"`
@@ -67,6 +92,9 @@ type Account struct {
 	AccountID string `json:"accountId"`
 	// Hint tells an account with no id from another: the end of its key.
 	Hint string `json:"hint,omitempty"`
+	// Models are the ids of the provider's models this account has, when
+	// the provider has more than one account; none, it has them all.
+	Models []string `json:"models,omitempty"`
 }
 
 var (
@@ -76,6 +104,16 @@ var (
 )
 
 func providersPath() string { return filepath.Join(settings.Dir(), "plugin-providers.json") }
+
+// ListedAt is when the plugins last listed their providers and models, as
+// a built-in's list is dated by when it was fetched.
+func ListedAt() (time.Time, bool) {
+	st, err := os.Stat(providersPath())
+	if err != nil {
+		return time.Time{}, false
+	}
+	return st.ModTime(), true
+}
 
 func forgetProviders() {
 	provMu.Lock()
@@ -91,12 +129,52 @@ func Providers(ctx context.Context) ([]Provider, error) {
 		return nil, err
 	}
 	provMu.Lock()
+	ps = keepUnloaded(ps, provCache)
 	provCache, provGood = ps, true
 	provMu.Unlock()
 	if b, err := json.Marshal(ps); err == nil {
 		_ = os.WriteFile(providersPath(), b, 0o600)
 	}
 	return ps, nil
+}
+
+// keepUnloaded is ps with the providers last known of an installed
+// plugin that told none this time: one that failed to load (a broken
+// update, its files gone, Bun refusing it) keeps its providers, their
+// accounts and what moved onto them in sight, its requests failing with
+// why, rather than going as if it were removed.
+func keepUnloaded(ps, last []Provider) []Provider {
+	if last == nil {
+		if b, err := os.ReadFile(providersPath()); err == nil {
+			_ = json.Unmarshal(b, &last)
+		}
+	}
+	told := map[string]bool{}
+	for _, p := range ps {
+		told[p.Spec] = true
+	}
+	installed := map[string]bool{}
+	for _, e := range Load().Plugins {
+		installed[e.Spec] = true
+	}
+	for _, p := range last {
+		if installed[p.Spec] && !told[p.Spec] {
+			ps = append(ps, p)
+		}
+	}
+	return ps
+}
+
+// UseCached is for tests: Cached answers with ps, as though the plugins
+// had just been asked, without Bun; nil forgets them.
+func UseCached(ps []Provider) {
+	provMu.Lock()
+	provCache, provGood = ps, ps != nil
+	provMu.Unlock()
+	// as asked with the plugins as they are now
+	listSeen.Lock()
+	listSeen.stamp, listSeen.set = listStamp(), ps != nil
+	listSeen.Unlock()
 }
 
 // refreshing is Cached's refreshes in the background.
@@ -113,6 +191,7 @@ func Settle() {
 // host: what is known of them when magpie has only just started. A
 // provider's sign-in is read afresh from plugin-auth.json.
 func Cached() []Provider {
+	checkList()
 	provMu.Lock()
 	ps := provCache
 	good := provGood
@@ -137,7 +216,15 @@ func Cached() []Provider {
 		if !on[p.Spec] {
 			continue
 		}
+		was := p.Accounts
 		p.Accounts = accountsOf(auth, p.ID)
+		for i, a := range p.Accounts {
+			for _, w := range was {
+				if w.Key == a.Key {
+					p.Accounts[i].Models = w.Models
+				}
+			}
+		}
 		p.SignedIn = len(p.Accounts) > 0
 		p.AuthType = ""
 		if p.SignedIn {
@@ -296,19 +383,28 @@ type Saved struct {
 // ErrFailed is a sign-in the plugin says failed.
 var ErrFailed = errors.New("the sign-in failed")
 
+// failure is ErrFailed with why, where the plugin told it.
+func failure(why string) error {
+	if why == "" {
+		return ErrFailed
+	}
+	return fmt.Errorf("%w: %s", ErrFailed, why)
+}
+
 // Finish waits for an OAuth sign-in to finish: an "auto" one on its own,
 // a "code" one with the code pasted back. It gives where the sign-in was
 // saved.
 func Finish(ctx context.Context, session, code string) (Saved, error) {
 	var r struct {
-		OK bool `json:"ok"`
+		OK    bool   `json:"ok"`
+		Error string `json:"error"`
 		Saved
 	}
 	if err := Call(ctx, "callback", map[string]any{"session": session, "code": code}, &r); err != nil {
 		return Saved{}, err
 	}
 	if !r.OK {
-		return Saved{}, ErrFailed
+		return Saved{}, failure(r.Error)
 	}
 	return r.Saved, nil
 }
@@ -317,14 +413,15 @@ func Finish(ctx context.Context, session, code string) (Saved, error) {
 // "api" method does.
 func APIKey(ctx context.Context, provider string, method int, inputs map[string]string, key, account string) (Saved, error) {
 	var r struct {
-		OK bool `json:"ok"`
+		OK    bool   `json:"ok"`
+		Error string `json:"error"`
 		Saved
 	}
 	if err := Call(ctx, "apiKey", map[string]any{"provider": provider, "method": method, "inputs": inputs, "key": key, "account": account}, &r); err != nil {
 		return Saved{}, err
 	}
 	if !r.OK {
-		return Saved{}, ErrFailed
+		return Saved{}, failure(r.Error)
 	}
 	return r.Saved, nil
 }
@@ -418,17 +515,26 @@ func Import(ctx context.Context, provider string, auth map[string]any) (string, 
 	return r.Account, nil
 }
 
+// Checked is what trying an account gave: the model ids the plugin lists
+// for it, its usage read (nil when the plugin tells none), and why its
+// models hook said the vendor refused the sign-in, if it did.
+type Checked struct {
+	Models  []string `json:"models"`
+	Usage   *Usage   `json:"usage"`
+	Refused string   `json:"refused"`
+}
+
 // Check tries one of provider's accounts as a request would — its auth
-// loader, then its models as the plugin lists them for it — and gives the
-// model ids.
-func Check(ctx context.Context, provider, account string) ([]string, error) {
-	var r struct {
-		Models []string `json:"models"`
+// loader, then its models as the plugin lists them for it — and reads its
+// usage, which asks the vendor of the account itself. It fails when the
+// plugin reached none of the places it asked (the vendor offline): a
+// models hook falling back to a list it keeps proves nothing.
+func Check(ctx context.Context, provider, account string) (Checked, error) {
+	var r Checked
+	if err := Call(ctx, "check", map[string]any{"provider": provider, "account": account, "proxy": proxyOf(ctx)}, &r); err != nil {
+		return Checked{}, err
 	}
-	if err := Call(ctx, "check", map[string]any{"provider": provider, "account": account}, &r); err != nil {
-		return nil, err
-	}
-	return r.Models, nil
+	return r, nil
 }
 
 // Auths are provider's sign-ins as plugin-auth.json keeps them, by key.
@@ -473,6 +579,7 @@ type Usage struct {
 	Balance string        `json:"balance"`
 	Error   string        `json:"error"`
 	User    string        `json:"user"`
+	SignIn  string        `json:"signIn"` // "expired", "kept", "renewed" or ""
 	Windows []UsageWindow `json:"windows"`
 	Resets  *UsageResets  `json:"resets"`
 }
@@ -502,6 +609,6 @@ type UsageWindow struct {
 // AccountUsage asks the plugin for account's usage of provider.
 func AccountUsage(ctx context.Context, provider, account string) (Usage, error) {
 	var u Usage
-	err := Call(ctx, "usage", map[string]any{"provider": provider, "account": account}, &u)
+	err := Call(ctx, "usage", map[string]any{"provider": provider, "account": account, "proxy": proxyOf(ctx)}, &u)
 	return u, err
 }

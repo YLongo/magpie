@@ -79,6 +79,7 @@ func All() []*Agent {
 		devin(home, cfg),
 		hermes(home),
 		kimi(home),
+		miniMax(home),
 		droid(home),
 		cline(home),
 		qoder(home),
@@ -234,7 +235,7 @@ func magpieProviderJSONAt(shape, catalog, gw string) any {
 			// group's context (magpie group set … context=) never reaches
 			// it; an output of 0 is OpenCode's own default
 			if m.Context > 0 {
-				e["limit"] = map[string]any{"context": m.Context, "output": m.Output}
+				e["limit"] = map[string]any{"context": m.Context, "output": maxTokens(m)}
 			}
 			e["variants"] = openCodeVariants(m.Efforts)
 			ms[m.ID] = e
@@ -248,7 +249,15 @@ func magpieProviderJSONAt(shape, catalog, gw string) any {
 			if window == 0 {
 				window = 200000
 			}
-			ms = append(ms, map[string]any{"id": m.ID, "name": m.Name, "context_window": window, "default_max_tokens": 16384,
+			// without it Crush caps every reply at 16384 tokens, a model
+			// that can write more of them never asked for it; an output
+			// above the window is cut to it, as it is for every other
+			// agent magpie hands a limit to
+			tokens := maxTokens(m)
+			if tokens == 0 {
+				tokens = 16384
+			}
+			ms = append(ms, map[string]any{"id": m.ID, "name": m.Name, "context_window": window, "default_max_tokens": tokens,
 				"can_reason": len(m.Efforts) > 0})
 		}
 		if ms == nil {
