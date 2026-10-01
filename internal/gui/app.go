@@ -473,13 +473,16 @@ func Run(version string, showMain bool, link string) error {
 	return h.app.Run()
 }
 
-// singleInstance makes a second launch hand over to this one, off the Mac.
-// The id covers the config dir, so a sandboxed HOME runs on its own, but
-// not the executable: two copies of magpie on one config (one autostarted
-// from where it was first run, another from where it was put later) would
-// share the gateway's port and put two icons in the tray.
+// singleInstance makes a second launch hand over to this one. The Mac
+// comes in too (fork): the autostart LaunchAgent runs `magpie tray` while
+// the session restores the app itself — two of the same app after a reboot,
+// for LaunchServices never saw either. The id covers the config dir, so a
+// sandboxed HOME runs on its own, but not the executable: two copies of
+// magpie on one config (one autostarted from where it was first run,
+// another from where it was put later) would share the gateway's port and
+// put two icons in the tray.
 func singleInstance(h *host) *application.SingleInstanceOptions {
-	if runtime.GOOS == "darwin" || !sessionBus() {
+	if !sessionBus() {
 		return nil
 	}
 	sum := sha256.Sum256([]byte(settings.Dir()))
