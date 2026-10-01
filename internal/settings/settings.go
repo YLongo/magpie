@@ -38,6 +38,10 @@ type Settings struct {
 	// rate (see internal/fx). A vendor's own balance, already in its own
 	// currency (a Chinese relay's ¥), is never touched by this.
 	Currency string `json:"currency,omitempty"`
+	// WesternUnits shortens a large count in K, M and B even when magpie
+	// speaks Chinese, which otherwise says it in 万 and 亿 (8000 万
+	// rather than 80M). It means nothing in English.
+	WesternUnits bool `json:"westernUnits,omitempty"`
 	// Dock keeps magpie in the Mac's Dock as well as the menu bar, for a
 	// menu bar too full to show its icon.
 	Dock bool `json:"dock,omitempty"`
@@ -60,11 +64,16 @@ type Settings struct {
 	RedactPersonal bool          `json:"redactPersonal,omitempty"`
 	RedactWords    []string      `json:"redactWords,omitempty"`
 	RedactRules    []redact.Rule `json:"redactRules,omitempty"`
-	// LAN shares the gateway on the local network, for agents on other
-	// machines; a request from one must carry LANKey as its API key, a
-	// key magpie makes when LAN is first turned on.
+	// LAN shares the gateway on the local network; remote callers must use
+	// named caller keys. LANKey is retained for older Magpie versions.
 	LAN    bool   `json:"lan,omitempty"`
 	LANKey string `json:"lanKey,omitempty"`
+	// LANKeyID remembers the default named key created when sharing is enabled.
+	LANKeyID string `json:"lanKeyId,omitempty"`
+	// RequestArchive keeps each call the gateway serves — its headers and
+	// bodies both ways, secrets taken out — in the S3 bucket sync keeps
+	// its backup in (gateway/archive.go), for looking into a request later.
+	RequestArchive bool `json:"requestArchive,omitempty"`
 	// CodexWarmup starts a ChatGPT account's next window as soon as the
 	// last one resets, with one tiny request, so it counts from then (a
 	// Codex window starts at its first use): "" off, "week" the weekly
@@ -141,6 +150,11 @@ type Settings struct {
 	// (#335) — but for two in one list that would read the same, which keep
 	// it (see provider.Labels).
 	PlainNames bool `json:"plainNames,omitempty"`
+	// PlainOwnNames, with PlainNames off, has those lists name a model the
+	// user gave a name of their own by that name alone, just as they wrote
+	// it (#92: "Opus 5.5", not "Opus 5.5 · Claude Code"), the vendor's names
+	// keeping their provider's after them (see provider.Labels).
+	PlainOwnNames bool `json:"plainOwnNames,omitempty"`
 	// TextSize is how large the window's and the tray panel's pages are
 	// drawn, in percent (one of TextSizes): the webviews' own zoom, as a
 	// browser's, so the text and everything around it grow together.
@@ -188,7 +202,10 @@ type Settings struct {
 	// tokens, by "<provider id>/<model id>", and "*" for every model of
 	// that provider: a provider models.dev does not list, or one that
 	// resells at a multiplier, is otherwise priced at whatever its maker's
-	// list price is.
+	// list price is. "*/<model id>" (AnyProvider) is that model from any
+	// provider not priced above, and a session's model named with no
+	// provider at all: one whose provider is gone, or one models.dev no
+	// longer lists.
 	ModelPrices map[string]ModelPrice `json:"modelPrices,omitempty"`
 	// ModelOutputs is the most a reply of a model may hold, by "<provider
 	// id>/<model id>", and "*" for every model of that provider. Absent
@@ -197,6 +214,15 @@ type Settings struct {
 	// provider's, and the agents' own files are told of either
 	// (see provider.SetModelOutput).
 	ModelOutputs map[string]int `json:"modelOutputs,omitempty"`
+	// ModelWires is the name to send a vendor for a model magpie knows by
+	// another, by "<provider id>/<model id>", and "*" for every model of that
+	// provider. A "*" in the name is the model itself, so one name covers a
+	// relay that namespaces its models — vendor-c/* asks for model-3 as
+	// vendor-c/model-3 — while a name with no "*" in it sends every model of
+	// that key under that one name. Everything else — the catalog agents see,
+	// the routing groups, the usage records and what a call is priced at —
+	// keeps the name magpie knows the model by.
+	ModelWires map[string]string `json:"modelWires,omitempty"`
 	// The main window's size when it was last resized, width and height,
 	// so it opens at it again after a restart.
 	Window []int `json:"window,omitempty"`
@@ -245,7 +271,11 @@ func (m ModelPrice) Price() (catalog.Price, string) {
 // Load discards the whole file rather than half of it, so neither reaches
 // here. Both are still refused, from a price typed in or passed in.
 func CheckModelPrice(key string, m ModelPrice) error {
-	if err := CheckModelKey("price", key); err != nil {
+	if model, every := strings.CutPrefix(key, AnyProvider); every {
+		if model == "" || model == "*" {
+			return fmt.Errorf("a price for every provider names one model, such as */claude-opus-4.6, not %q", key)
+		}
+	} else if err := CheckModelKey("price", key); err != nil {
 		return err
 	}
 	if _, bad := m.Price(); bad != "" {
@@ -253,6 +283,10 @@ func CheckModelPrice(key string, m ModelPrice) error {
 	}
 	return nil
 }
+
+// AnyProvider begins a ModelPrices key that prices a model whichever
+// provider it came through, its id lower-cased after it.
+const AnyProvider = "*/"
 
 // anArticle is the article a word takes where a message names it, so that an
 // input price is not "a input price".

@@ -28,6 +28,10 @@ const modelUsage = `usage:
                                                  0.12,1.20,0.01,0.15; 0 is a model served for nothing, which is
                                                  a price, not the absence of one
   magpie model price <provider/model> --reset    take your price off this model
+  magpie model price <model> <in>,<out>,<cache read>,<cache write>
+                                                 what the model costs from any provider you have not priced it
+                                                 for, kept as '*/<model>': for usage whose provider is gone, or
+                                                 a model models.dev doesn't price, e.g. gemini-3-pro-preview
   magpie model prices                            the models you priced
   magpie model context <provider/model>          how long a request it takes, and what you said it takes
   magpie model context <provider/model> <n>      say how long, as 200000 or 1m; '<provider>/*' is every model
@@ -35,14 +39,25 @@ const modelUsage = `usage:
   magpie model output <provider/model>           the most a reply of it may hold, and what you said
   magpie model output <provider/model> <n>       say the most, as 128000 or 128k; '<provider>/*' is every model
   magpie model output <provider/model> --reset   take your limit off this model
+  magpie model wire <provider/model>             the name the vendor is asked for, and the one you gave
+  magpie model wire <provider/model> <name>      ask for the model by this name, for a relay that serves it
+  magpie model wire '<provider>/*' <name>        ask for every model of that provider by this name; a * in
+                                                 it is the model, so vendor-c/* asks for model-3 as
+                                                 vendor-c/model-3. Quote it: a shell reads a bare * as a glob
+  magpie model wire <provider/model> --reset     ask for it by the name magpie knows it by again, under an
+                                                 id of its own for a provider that has since been deleted,
+                                                 and says when there was no name of its own to take away
+  magpie model wires                             the names your vendors are asked for models by
   magpie model names                             the models you named or narrowed
-  magpie model suffix [on|off]                   whether the agents' lists name each model with its provider
+  magpie model suffix [on|own|off]               whether the agents' lists name each model with its provider
                                                  (or "routing group") after it: on, as by default, "Sol · OpenAI";
-                                                 off, "Sol" alone — but two a list would name the same keep it
+                                                 own, a name you gave a model just as you wrote it, "Opus 5.5",
+                                                 the others as on; off, "Sol" alone — but two a list would name
+                                                 the same keep it
 
   Each is looked for in this order: this model, then <provider id>/*, then the provider's own
   list, then models.dev. --reset removes only the first, and says so when a <provider id>/* value
-  still applies.
+  still applies. A price comes from '*/<model>' after <provider id>/* and before any list price.
 
   Only what agents are shown changes with a name or levels: they still pick the model, and
   requests still reach it, as <provider/model>. The same model from another provider keeps
@@ -71,12 +86,16 @@ func modelCmd(args []string) error {
 		return modelPrice(args[1:])
 	case "prices":
 		return modelPrices()
+	case "wires":
+		return modelWires()
 	case "suffix", "suffixes":
 		return modelSuffix(args[1:])
 	case "context", "ctx":
 		return modelContext(args[1:])
 	case "output", "max-output":
 		return modelOutput(args[1:])
+	case "wire", "upstream":
+		return modelWire(args[1:])
 	case "help", "-h", "--help":
 		fmt.Println(modelUsage)
 		return nil
@@ -231,10 +250,23 @@ func modelPrice(args []string) error {
 	// prices` and still counted, so a reset that resolved the provider
 	// first could not take it away — and would take another provider's
 	// price away instead where the gone one's name has been given to one.
-	if isReset(rest) {
-		return resetModelPrice(args[0])
+	ref := args[0]
+	// a model named with no provider, or as */model, is that model from any
+	// provider: what prices a session's model whose provider is gone, or one
+	// that never went through magpie
+	every := false
+	if r := strings.TrimPrefix(strings.TrimSpace(ref), "magpie/"); r != "" && !strings.Contains(r, "/") {
+		ref, every = settings.AnyProvider+r, true
+	} else {
+		every = strings.HasPrefix(r, settings.AnyProvider)
 	}
-	p, model, err := modelRef(args[0])
+	if isReset(rest) {
+		return resetModelPrice(ref)
+	}
+	if every {
+		return anyModelPrice(ref, rest)
+	}
+	p, model, err := modelRef(ref)
 	if err != nil {
 		return err
 	}
@@ -253,6 +285,9 @@ func modelPrice(args []string) error {
 		case "provider":
 			fmt.Println(faint.Render("  · what you said every model of this provider costs · magpie model price " +
 				typedRef(p.ID+"/*") + " --reset takes that away"))
+		case "any":
+			fmt.Println(faint.Render("  · what you said this model costs from any provider · magpie model price " +
+				typedRef(provider.AnyPriceKey(model)) + " --reset takes that away"))
 		case "ignored":
 			fmt.Println(faint.Render("  · a price you gave is not usable and is ignored"))
 		default:
@@ -261,24 +296,64 @@ func modelPrice(args []string) error {
 		}
 		return nil
 	}
+	pr, err := parsePrice(rest)
+	if err != nil {
+		return err
+	}
+	if err := provider.SetModelPrice(id, &pr); err != nil {
+		return err
+	}
+	fmt.Println(green.Render("✓"), id, muted.Render("costs"), bold.Render(perMillion(pr)))
+	return nil
+}
+
+// parsePrice is the four parts of a price as typed, in USD per million
+// tokens.
+func parsePrice(rest []string) (catalog.Price, error) {
 	var nums []float64
 	for _, a := range rest {
 		for _, f := range strings.FieldsFunc(a, func(r rune) bool { return r == ',' || r == ' ' || r == '/' }) {
 			v, err := strconv.ParseFloat(f, 64)
 			if err != nil {
-				return fmt.Errorf("a price is numbers in USD per million tokens, like 0.12,1.20,0.01,0.15, not %q", f)
+				return catalog.Price{}, fmt.Errorf("a price is numbers in USD per million tokens, like 0.12,1.20,0.01,0.15, not %q", f)
 			}
 			nums = append(nums, v)
 		}
 	}
 	if len(nums) != 4 {
-		return fmt.Errorf("give all four parts, input,output,cache read,cache write — %d given", len(nums))
+		return catalog.Price{}, fmt.Errorf("give all four parts, input,output,cache read,cache write — %d given", len(nums))
 	}
-	pr := catalog.Price{Input: nums[0], Output: nums[1], CacheRead: nums[2], CacheWrite: nums[3]}
-	if err := provider.SetModelPrice(id, &pr); err != nil {
+	return catalog.Price{Input: nums[0], Output: nums[1], CacheRead: nums[2], CacheWrite: nums[3]}, nil
+}
+
+// anyModelPrice shows or sets what a model costs from any provider (*/model):
+// the price a session's model is counted at when no price of a provider's
+// own applies — its provider gone, the model no longer listed by it, or a
+// model models.dev doesn't price.
+func anyModelPrice(ref string, rest []string) error {
+	key := provider.AnyPriceKey(strings.TrimPrefix(strings.TrimPrefix(strings.TrimSpace(ref), "magpie/"), settings.AnyProvider))
+	if key == settings.AnyProvider || key == settings.AnyProvider+"*" {
+		return fmt.Errorf("name one model, such as %s", typedRef("*/claude-opus-4.6"))
+	}
+	if len(rest) == 0 {
+		if pr, ok := statedPrice(settings.Load().ModelPrices, key); ok {
+			fmt.Println(bold.Render(perMillion(pr)), muted.Render("· "+key))
+			fmt.Println(faint.Render("  · cache read " + money(pr.CacheRead) + ", cache write " + money(pr.CacheWrite)))
+			fmt.Println(faint.Render("  · what you said this model costs from any provider · --reset takes that away"))
+			return nil
+		}
+		fmt.Println(muted.Render(key), faint.Render("· no price of yours · magpie model price "+typedRef(key)+" <in>,<out>,<cache read>,<cache write>"))
+		return nil
+	}
+	pr, err := parsePrice(rest)
+	if err != nil {
 		return err
 	}
-	fmt.Println(green.Render("✓"), id, muted.Render("costs"), bold.Render(perMillion(pr)))
+	if err := provider.SetModelPrice(key, &pr); err != nil {
+		return err
+	}
+	fmt.Println(green.Render("✓"), key, muted.Render("costs"), bold.Render(perMillion(pr)),
+		faint.Render("from any provider you have not priced it for"))
 	return nil
 }
 
@@ -306,6 +381,14 @@ func resetModelPrice(ref string) error {
 	}
 	s := settings.Load()
 	wid, _, _ := strings.Cut(key, "/")
+	if strings.HasPrefix(key, settings.AnyProvider) {
+		if !dropped {
+			return fmt.Errorf("%s has no price of yours to reset — magpie model prices lists the ones you set", key)
+		}
+		fmt.Println(green.Render("✓"), key,
+			muted.Render("no longer has a price of yours; it is costed at what its provider lists, or its maker's on models.dev"))
+		return nil
+	}
 	if !dropped {
 		if _, wide := statedPrice(s.ModelPrices, wid+"/*"); wide {
 			return fmt.Errorf("%s has no price of its own; what it costs is what you set for every model of this provider, %s/*, which magpie model price %s --reset takes away",
@@ -359,6 +442,9 @@ func priceFrom(s settings.Settings, providerID, model string) string {
 	if _, ok := statedPrice(s.ModelPrices, providerID+"/*"); ok {
 		return "provider"
 	}
+	if _, ok := statedPrice(s.ModelPrices, provider.AnyPriceKey(model)); ok {
+		return "any"
+	}
 	if _, given := s.ModelPrices[providerID+"/"+model]; given {
 		return "ignored"
 	}
@@ -390,30 +476,39 @@ func modelPrices() error {
 }
 
 // modelSuffix says whether the agents' lists name models with their
-// providers' after them, or sets it (#335).
+// providers' after them, all but the names the user gave (#92), or none
+// (#335), or sets it.
 func modelSuffix(args []string) error {
 	if len(args) == 0 {
-		if settings.Load().PlainNames {
-			fmt.Println("off", muted.Render("· agents' lists name a model alone, \"Sol\" · magpie model suffix on"))
-		} else {
-			fmt.Println("on", muted.Render("· agents' lists name a model with its provider, \"Sol · OpenAI\" · magpie model suffix off"))
+		switch provider.SuffixMode() {
+		case provider.SuffixOff:
+			fmt.Println("off", muted.Render("· agents' lists name a model alone, \"Sol\" · magpie model suffix on|own"))
+		case provider.SuffixOwn:
+			fmt.Println("own", muted.Render("· a name you gave a model just as you wrote it, \"Opus 5.5\"; the others \"Sol · OpenAI\" · magpie model suffix on|off"))
+		default:
+			fmt.Println("on", muted.Render("· agents' lists name a model with its provider, \"Sol · OpenAI\" · magpie model suffix own|off"))
 		}
 		return nil
 	}
-	var plain bool
+	mode := provider.SuffixOn
 	switch strings.ToLower(args[0]) {
 	case "on", "yes", "true":
+	case "own", "mine":
+		mode = provider.SuffixOwn
 	case "off", "no", "false":
-		plain = true
+		mode = provider.SuffixOff
 	default:
-		return fmt.Errorf("magpie model suffix on|off, not %q", args[0])
+		return fmt.Errorf("magpie model suffix on|own|off, not %q", args[0])
 	}
-	if err := provider.SetPlainNames(plain); err != nil {
+	if err := provider.SetSuffixMode(mode); err != nil {
 		return err
 	}
-	if plain {
+	switch mode {
+	case provider.SuffixOff:
 		fmt.Println(green.Render("✓"), "agents' lists name each model alone", muted.Render("· two that would read the same keep their provider's"))
-	} else {
+	case provider.SuffixOwn:
+		fmt.Println(green.Render("✓"), "agents' lists name a model you named just as you wrote it", muted.Render("· the others with their provider"))
+	default:
 		fmt.Println(green.Render("✓"), "agents' lists name each model with its provider again")
 	}
 	return nil
@@ -445,6 +540,42 @@ func modelNames() error {
 			line += "  " + muted.Render(strings.Join(es, "/"))
 		}
 		fmt.Println(line)
+	}
+	return nil
+}
+
+// modelWires lists the names the user gave the vendors their models are asked
+// for, and which provider and model each is for. It is `magpie model prices`
+// for the wire names: those are what a provider is asked for, and no other
+// command says what is kept for a provider as a whole, so a name given for
+// every model of one was written with no way to read it back.
+//
+// A name kept for a provider that has since been deleted is listed like any
+// other: the name outlives the provider it was given for, and is in force for
+// whichever provider takes that id next, so it is read off the file rather
+// than off a provider that may not be there.
+//
+// A name that is only whitespace is no name and is not listed, as it is
+// nowhere else a name is read: UpstreamNames leaves it out and a request
+// under it goes out by the name magpie knows the model by. Listing it would
+// print a line with nothing on it for a name no vendor is asked for, which
+// is the one thing a listing read back off the file must not say.
+func modelWires() error {
+	wires := settings.Load().ModelWires
+	rows := make([][2]string, 0, len(wires))
+	w := 0
+	for _, k := range slices.Sorted(maps.Keys(wires)) {
+		if n := strings.TrimSpace(wires[k]); n != "" {
+			rows = append(rows, [2]string{k, n})
+			w = max(w, len(k))
+		}
+	}
+	if len(rows) == 0 {
+		fmt.Println(muted.Render("no vendor is asked for a model by another name yet · magpie model wire <provider/model> <name>"))
+		return nil
+	}
+	for _, r := range rows {
+		fmt.Println("  " + pad(r[0], w) + "  " + r[1])
 	}
 	return nil
 }
@@ -680,4 +811,283 @@ func tokenCount(n int) string {
 	default:
 		return fmt.Sprintf("%d", n)
 	}
+}
+
+func modelWire(args []string) error {
+	if len(args) == 0 {
+		return fmt.Errorf("%s", modelUsage)
+	}
+	// --reset comes before the provider is looked for, and works off the key
+	// the name is stored at: a name outlives the provider it was given for,
+	// and one whose provider has since been deleted is in force for
+	// whichever provider takes that id next, its requests going out renamed
+	// to a vendor that never heard of it. So it is the one name --reset
+	// most has to reach, and the only one a reset that resolved the
+	// provider first could not.
+	//
+	// What decides this is the key, not the lookup: a name under an id no
+	// provider has now is in force for whoever takes that id, and so is one
+	// under an id another provider is shown by — the provider such a ref
+	// resolves to holding a name of its own, which is the one a removal
+	// taken through it would take away instead. A ref that names its
+	// provider by that provider's own id keeps to the path below, which
+	// reports the removal as one.
+	if len(args) > 1 && isReset(args[1:]) {
+		pid, model, err := splitModelRef(args[0])
+		if err != nil {
+			return err
+		}
+		p, ferr := provider.Find(pid)
+		if ferr != nil || (p.ID != pid && provider.HasUpstreamName(pid+"/"+model)) {
+			dropped, err := provider.DropUpstreamName(pid + "/" + model)
+			if err != nil {
+				return err
+			}
+			if dropped {
+				fmt.Println(green.Render("✓"), pid+"/"+model,
+					muted.Render("no longer has a name of its own; a provider taking that id later is asked for it by the name magpie knows it by"))
+				return nil
+			}
+			// no name is kept under that key, so the id is a mistyped one
+			// and not a deleted provider's; the lookup below says which
+			// provider is not there, as it does for every other command
+		}
+	}
+	p, model, err := modelRef(args[0])
+	if err != nil {
+		return err
+	}
+	id := p.ID + "/" + model
+	every, shown := "'"+p.ID+"/*'", p.ID+"/"+model // quoted: a shell reads a bare * as a glob
+	if model == "*" {
+		shown = every
+	}
+	names := p.UpstreamNames()
+	_, own := names[model]
+	_, one := names["*"]
+	rest := args[1:]
+	asked := provider.UpstreamName(*p, model)
+	if len(rest) == 0 {
+		fmt.Println(bold.Render(asked), muted.Render("· what "+p.Name+" is asked for, for "+shown))
+		switch {
+		case asked == model:
+			fmt.Println(faint.Render("  · the same name magpie knows it by · magpie model wire " + shown + " <name> to change it"))
+		case model == "*":
+			fmt.Println(faint.Render("  · " + exampleOf(p, asked)))
+			fmt.Println(faint.Render("  · --reset takes it away · magpie model wire " + p.ID + "/<model> <name> gives a single model one of its own"))
+		case own:
+			fmt.Println(faint.Render("  · magpie and the agents still know it as " + model + " · --reset asks for that again"))
+		case one:
+			fmt.Println(faint.Render("  · from the name given for every model of " + p.Name + " (" + every + " " + names["*"] + ")" +
+				" · --reset on it leaves that one in force"))
+		}
+		return nil
+	}
+	name := strings.Join(rest, " ")
+	if isReset(rest) {
+		name = ""
+	}
+	// A blank name is a removal, --reset or a name of only whitespace
+	// alike, and it is DropUpstreamName that makes it: it says whether
+	// there was a name there to take away, which with the provider's own
+	// list is what tells a model already asked for by the name magpie
+	// knows it by from one the provider does not serve at all, for which
+	// no name could have been kept. A ✓ over a key holding no name would
+	// read as a name being gone that never was there, and under a
+	// provider-wide name as the model's own name being the one in force,
+	// which it is not. So the removal is asked for rather than made blind,
+	// the way `magpie model price --reset` asks DropModelPrice.
+	if strings.TrimSpace(name) == "" {
+		return resetWireName(*p, model, id, shown)
+	}
+	if err := provider.SetUpstreamName(id, name); err != nil {
+		return err
+	}
+	now := provider.UpstreamName(*p, model)
+	if model == "*" {
+		// the same precedence the reset above is honest about: a model's
+		// own key wins over the provider's, so the models that keep one
+		// are not asked for under this, and a ✓ claiming every model of
+		// the provider is would be false wherever there is one. The
+		// example stands on a model this reaches, so the ones it does
+		// not are named here rather than left to be found one at a time.
+		scope, kept := "every model of "+p.Name, ownKeptSaid(p)
+		if kept != "" {
+			scope += " with no name of its own"
+		}
+		fmt.Println(green.Render("✓"), shown, muted.Render("· "+scope+" is asked for as"), bold.Render(now))
+		fmt.Println(faint.Render("  · " + exampleOf(p, now)))
+		if kept != "" {
+			fmt.Println(faint.Render("  · " + kept))
+		}
+		return nil
+	}
+	fmt.Println(green.Render("✓"), shown, muted.Render("is asked for as"), bold.Render(now),
+		faint.Render("· magpie and the agents still know it as "+model))
+	return nil
+}
+
+// resetWireName takes a name off under the key it is stored at and says what
+// the model is asked for now, which is the name a wildcard entry leaves in
+// force where one is in force at all.
+//
+// A key holding no name is an error rather than a tick, as it is for a price:
+// a removal over a name that is not there has taken nothing away, and the
+// tick would say the model is asked for by the name magpie knows it by — a
+// claim nothing stands behind, and one that is false wherever a name given
+// for the whole provider is in force. So there are three answers, as there
+// are for a price: the model is not one the provider serves, so none could
+// have been kept for it and none is in force; nothing was kept under that key
+// of a model it does serve; or what is in force is the provider's own name
+// and that is the one --reset reaches.
+func resetWireName(p provider.Provider, model, id, shown string) error {
+	dropped, err := provider.DropUpstreamName(id)
+	if err != nil {
+		return err
+	}
+	now := provider.UpstreamName(p, model)
+	if !dropped {
+		if model != "*" && !provider.ServesModel(p, model) {
+			// none was kept and none could have been: a model the
+			// provider has nothing like is never asked for by any name,
+			// so naming the one in force would claim a request magpie
+			// does not make
+			return fmt.Errorf("%s is not a model of %s magpie knows of, so there is nothing to take away and none in force: a name is only kept for a model the provider serves, and this one is asked for by no name", id, p.Name)
+		}
+		every := "'" + p.ID + "/*'"
+		if provider.HasUpstreamName(p.ID + "/*") {
+			return fmt.Errorf("%s has no name of its own; what it is asked for is %s, the name given for every model of %s, which magpie model wire %s --reset takes away",
+				id, now, p.Name, every)
+		}
+		if model == "*" {
+			// the same precedence the success below is honest about: a
+			// model's own key wins over the provider's, so one that keeps
+			// a name is asked for under it whatever this pattern said, and
+			// "every model …" is false the moment there is one — so the
+			// models that keep a name are named here as they are there
+			if kept := ownKeptSaid(&p); kept != "" {
+				return fmt.Errorf("%s has no name of its own to reset, so there was nothing to take away: %s", id, kept)
+			}
+			return fmt.Errorf("%s has no name of its own to reset, so there was nothing to take away: every model of %s is already asked for by the name magpie knows it by", id, p.Name)
+		}
+		return fmt.Errorf("%s has no name of its own to reset, so there was nothing to take away: it is already asked for as %s", id, now)
+	}
+	if now != model {
+		fmt.Println(green.Render("✓"), shown, muted.Render("has no name of its own again · it is still asked for as"),
+			bold.Render(now), faint.Render("· that is the name given for '"+p.ID+"/*'"))
+		return nil
+	}
+	if model == "*" {
+		// the provider's own name is gone, but a model's own beats it
+		// while it is there, so the models that keep one are still asked
+		// for by it — and saying every model of the provider is asked
+		// for by the name magpie knows it by is false the moment one
+		// does, so they are named instead
+		if kept := ownKeptSaid(&p); kept != "" {
+			fmt.Println(green.Render("✓"), shown, muted.Render("has no name of its own again ·"), kept)
+			return nil
+		}
+		fmt.Println(green.Render("✓"), shown, muted.Render("· every model of "+p.Name+" is asked for by the name magpie knows it by again"))
+		return nil
+	}
+	fmt.Println(green.Render("✓"), shown, muted.Render("is asked for as"), bold.Render(model), muted.Render("again"))
+	return nil
+}
+
+// ownKept are the models of a provider that keep a name of their own, in the
+// order they are shown. A name given for every model of a provider does not
+// reach them: a model's own key wins over the provider's, so each is asked
+// for by its own whatever the provider's entry says, and a line about every
+// model of that provider is true only where there is none to leave out of it.
+// Naming them is what says which of the two is in force, which the example
+// such a name is shown with cannot: that one stands on a model with no name
+// of its own, or on the pattern alone, and names no model the provider's entry
+// does not reach.
+//
+// A name kept for a model the provider does not serve is not one of these:
+// magpie asks for no such a model, so nothing goes out under that name, and
+// saying it did would claim a request that is not made.
+func ownKept(p *provider.Provider) []string {
+	names := p.UpstreamNames()
+	kept := make([]string, 0, len(names))
+	for _, m := range slices.Sorted(maps.Keys(names)) {
+		if m != "*" && provider.ServesModel(*p, m) {
+			kept = append(kept, m)
+		}
+	}
+	return kept
+}
+
+// ownKeptSaid is ownKept said as a sentence, and is "" where there is none.
+//
+// A model is named with the name it goes out under, not with the one as it
+// is stored: a star in a model's own name is that model, as it is in one
+// given for every model of a provider (UpstreamNameIn), so it is the model
+// magpie knows the model by that stands there. The whole claim of the
+// sentence is that this is the name in force, so a star left standing in it
+// would name an id no vendor is ever asked for.
+func ownKeptSaid(p *provider.Provider) string {
+	names, kept := p.UpstreamNames(), ownKept(p)
+	askedFor := func(m string) string { return strings.ReplaceAll(names[m], "*", m) }
+	switch len(kept) {
+	case 0:
+		return ""
+	case 1:
+		return kept[0] + " is asked for as " + askedFor(kept[0]) + ", a name of its own"
+	}
+	// a relay with a name of its own for every model it serves would
+	// otherwise answer in a line as long as its list, so a few are named
+	// and the rest counted
+	const room = 3
+	shown, more := kept, ""
+	if len(shown) > room {
+		shown, more = shown[:room], ", … and "+strconv.Itoa(len(kept)-room)+" more"
+	}
+	asked := make([]string, 0, len(shown))
+	for _, m := range shown {
+		asked = append(asked, askedFor(m))
+	}
+	return strings.Join(shown, ", ") + " are asked for as " + strings.Join(asked, ", ") + ", names of their own" + more
+}
+
+// exampleOf is what a name given for a provider's every model asks for: a
+// model of that provider for it to stand on, and what that model goes out as.
+// The star in such a name is that model, so it says what it stands for.
+//
+// The model is one of Exposed, the list the user is shown, and not of
+// Available, which is every model the vendor is known to serve: a relay
+// fronting one vendor under ids of its own shares that vendor's catalogue,
+// so its first model is one nobody is offered, and an example standing on it
+// names a model the user cannot pick and the name was not given for. Exposed
+// is the user's own list where the file has one, so that is what it is read
+// from there.
+//
+// It is the first of them with no name of its own, and that is what the
+// provider's own name is really in force for: a model's own key wins over the
+// provider's, so a model given a name of its own is asked for by that one
+// whatever is given for every model, and an example standing on it would say
+// a name no request goes out under, which reads as the one thing the
+// provider's own entry does not reach.
+//
+// A provider with nothing to stand one on — no catalogue, nothing fetched,
+// nothing in the file, or a name of its own for every model it shows — is
+// left with the pattern alone, which is all a relay naming none of its own
+// can be told.
+func exampleOf(p *provider.Provider, name string) string {
+	if !strings.Contains(name, "*") {
+		return p.Name + " is asked for every one of its models as " + name
+	}
+	const star = " · * is the model magpie knows each of them by"
+	names := p.UpstreamNames()
+	model := ""
+	for _, m := range p.Exposed() {
+		if _, own := names[m.ID]; !own {
+			model = m.ID
+			break
+		}
+	}
+	if model == "" {
+		return p.Name + " is asked for every one of its models as " + name + star
+	}
+	return p.ID + "/" + model + " is asked for as " + strings.ReplaceAll(name, "*", model) + star
 }

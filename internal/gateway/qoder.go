@@ -63,7 +63,7 @@ func (s *Server) serveQoder(w http.ResponseWriter, r *http.Request, from provide
 	q := req
 	var tool string
 	if req.WebSearch && !searching(r.Context()) {
-		if _, _, ok := searcher(); ok {
+		if canSearch() {
 			copy := *req
 			copy.WebSearch = false
 			search := searchTool(copy.Tools)
@@ -120,22 +120,28 @@ func relayStatus(w http.ResponseWriter, from provider.Protocol, name string, req
 		if len(head) == 0 || head[len(head)-1].Kind == KStart || head[len(head)-1].Kind == KUsage {
 			return fail(Event{Text: name + " ended without an answer"})
 		}
-		enc := encoder(from, newSSEWriter(w), req)
+		sw := newSSEWriter(w)
+		enc := encoder(from, sw, req)
+		var failed string
 		see := func(ev Event) bool {
 			if ev.Kind == KStart || ev.Kind == KUsage {
 				usage.add(ev.Usage)
 			}
 			enc.event(ev)
-			return ev.Kind != KError
+			if ev.Kind == KError {
+				failed = ev.Text
+				return false
+			}
+			return true
 		}
 		for _, ev := range head {
 			see(ev)
 		}
-		for ev := range events {
-			if !see(ev) {
-				abort()
-				return 200, ev.Text
-			}
+		// kept from the client's idle timeout while none comes (#436)
+		relayEvents(events, sw, enc, see)
+		if failed != "" {
+			abort()
+			return 200, failed
 		}
 		enc.finish()
 		return 200, ""

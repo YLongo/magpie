@@ -10,6 +10,7 @@ package gateway
 
 import (
 	"context"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -23,17 +24,20 @@ const traceKeep = 60
 
 // Route is one request's way through routing.
 type Route struct {
-	Seq      int64     `json:"seq"` // the trace's count when it last changed
-	ID       int64     `json:"id"`
-	Time     time.Time `json:"time"`
-	Agent    string    `json:"agent"`
-	Kind     string    `json:"kind,omitempty"`   // what the call is for, as Call's
-	For      *CallFor  `json:"for,omitempty"`    // the request it was made for, as Call's
-	Model    string    `json:"model"`            // as the agent asked
-	Effort   string    `json:"effort,omitempty"` // the reasoning the agent asked for; "" for none
-	Provider string    `json:"provider"`         // the provider the model resolved to
-	Group    *GroupRef `json:"group,omitempty"`  // the routing group the agent asked for
-	Rule     *RuleHit  `json:"rule,omitempty"`   // the group's rules for it, when it has any
+	Seq           int64        `json:"seq"` // the trace's count when it last changed
+	ID            int64        `json:"id"`
+	Time          time.Time    `json:"time"`
+	Agent         string       `json:"agent"`
+	ParentSession string       `json:"parentSession,omitempty"` // title helper's explicit originating chat; does not affect routing
+	Session       string       `json:"session,omitempty"`       // the client's session id, never inferred from its model or account
+	Usage         []RouteUsage `json:"usage,omitempty"`         // token tiers of billable tries; priced when read
+	Kind          string       `json:"kind,omitempty"`          // what the call is for, as Call's
+	For           *CallFor     `json:"for,omitempty"`           // the request it was made for, as Call's
+	Model         string       `json:"model"`                   // as the agent asked
+	Effort        string       `json:"effort,omitempty"`        // the reasoning the agent asked for; "" for none
+	Provider      string       `json:"provider"`                // the provider the model resolved to
+	Group         *GroupRef    `json:"group,omitempty"`         // the routing group the agent asked for
+	Rule          *RuleHit     `json:"rule,omitempty"`          // the group's rules for it, when it has any
 	// Nested: the rules of the groups in the group, down the way to the
 	// one that went first, each as it decided
 	Nested   []NestedRule `json:"nested,omitempty"`
@@ -54,9 +58,29 @@ type Route struct {
 	TTFT      int64 `json:"ttft,omitempty"`
 	FirstText int64 `json:"firstText,omitempty"`
 	// Served: the model the reply says answered, as the last try has it;
-	// Swapped: another than the one that try asked for
+	// Swapped: another than the one that try asked for; Routed: that try
+	// asked another magpie's routing group, and Served is its member
 	Served  string `json:"served,omitempty"`
 	Swapped bool   `json:"swapped,omitempty"`
+	Routed  bool   `json:"routed,omitempty"`
+}
+
+// RouteUsage is one billable attempt's pricing inputs, kept in routing history.
+// Its JSON keys also read the earlier history that stored full usage records.
+type RouteUsage struct {
+	Provider   string `json:"provider"`
+	Model      string `json:"model"`
+	Input      int    `json:"in"`
+	Output     int    `json:"out"`
+	CacheRead  int    `json:"cache_read,omitempty"`
+	CacheWrite int    `json:"cache_write,omitempty"`
+	Reasoning  int    `json:"reasoning,omitempty"`
+}
+
+// PricingRecord lets the routing view reuse the ledger's effective prices.
+func (u RouteUsage) PricingRecord() usage.Record {
+	return usage.Record{Provider: u.Provider, Model: u.Model, Input: u.Input,
+		Output: u.Output, CacheRead: u.CacheRead, CacheWrite: u.CacheWrite, Reasoning: u.Reasoning}
 }
 
 // GroupRef is the routing group a request asked for.
@@ -72,6 +96,8 @@ type GroupRef struct {
 	// Via: for each of Members, the groups in the group it is of, as
 	// "fast>cheap" ("" for the group's own), when it has groups in it
 	Via []string `json:"via,omitempty"`
+	// Fast: those of Members sent in their vendor's fast mode
+	Fast []string `json:"fast,omitempty"`
 }
 
 // SubGroup is a routing group in the group a request asked for.
@@ -96,6 +122,9 @@ func groupRef(g provider.Group, ms []provider.Member) *GroupRef {
 	seen := map[string]bool{}
 	for _, m := range ms {
 		ref.Members = append(ref.Members, provider.WithMemberEffort(m.Provider.ID+"/"+m.Model, m.Effort))
+		if m.Fast {
+			ref.Fast = append(ref.Fast, ref.Members[len(ref.Members)-1])
+		}
 		ref.Via = append(ref.Via, strings.Join(m.Groups(), ">"))
 		in := g.ID
 		for _, v := range m.Via {
@@ -125,6 +154,7 @@ type Weighed struct {
 	Plan     string            `json:"plan,omitempty"`
 	Model    string            `json:"model"`
 	Fixed    string            `json:"fixed,omitempty"` // the effort the group's member it is of is fixed at
+	Fast     bool              `json:"fast,omitempty"`  // the group's member it is of is sent fast
 	Routing  string            `json:"routing"`         // its provider's: "", order, rotate, usage
 	Fallback bool              `json:"fallback,omitempty"`
 	Shared   bool              `json:"shared,omitempty"` // its provider has more than one on
@@ -155,6 +185,7 @@ type Try struct {
 	// Fixed: the effort the group's member it went to is fixed at, which
 	// Effort is (fitted to the model's levels) whatever was asked
 	Fixed  string    `json:"fixed,omitempty"`
+	Fast   bool      `json:"fast,omitempty"` // sent in its vendor's fast mode, as the group's member it went to is
 	Start  time.Time `json:"start"`
 	Done   bool      `json:"done"`
 	Status int       `json:"status,omitempty"`
@@ -164,9 +195,12 @@ type Try struct {
 	TTFT      int64 `json:"ttft,omitempty"`
 	FirstText int64 `json:"firstText,omitempty"`
 	// Served: the model its reply said answered, when it named one;
-	// Swapped: another model than Model, not just its dated name
+	// Swapped: another model than Model, not just its dated name; Routed:
+	// Model is another magpie's routing group, and Served the member it
+	// routed to (usage.GroupRouted)
 	Served  string `json:"served,omitempty"`
 	Swapped bool   `json:"swapped,omitempty"`
+	Routed  bool   `json:"routed,omitempty"`
 	Fail    string `json:"fail,omitempty"` // why it failed, as rest tells it
 	Error   string `json:"error,omitempty"`
 	Rest    *Rest  `json:"rest,omitempty"`  // how long it now sits out; none when it was the last to try
@@ -189,7 +223,7 @@ type planned struct {
 }
 
 func weighed(c candidate, p provider.Provider, wg weighing, fallback bool, from provider.Protocol) Weighed {
-	w := Weighed{ID: c.rest, Provider: p.ID, Name: p.Name, Icon: p.Icon, Preset: p.Preset, Model: c.model, Fixed: c.effort,
+	w := Weighed{ID: c.rest, Provider: p.ID, Name: p.Name, Icon: p.Icon, Preset: p.Preset, Model: c.model, Fixed: c.effort, Fast: c.fast,
 		Routing: p.Routing, Fallback: fallback, Shared: c.rest != p.ID}
 	switch {
 	case c.p.Account != nil:
@@ -266,12 +300,27 @@ func (t *trace) begin(r Route) *Route {
 	}
 	rp := &r
 	t.routes = append(t.routes, rp)
-	if len(t.routes) > traceKeep {
-		t.routes = t.routes[len(t.routes)-traceKeep:]
-	}
+	t.trim()
 	t.changed()
 	rp.Seq = t.seq
 	return rp
+}
+
+// trim keeps traceKeep routes, the oldest finished ones going first: a
+// request still going isn't dropped for those that came after it (#436),
+// as the history has only finished ones, unless more than twice traceKeep
+// are going at once.
+func (t *trace) trim() {
+	for len(t.routes) > traceKeep {
+		i := slices.IndexFunc(t.routes, func(r *Route) bool { return r.Done })
+		if i < 0 {
+			if len(t.routes) <= 2*traceKeep {
+				return
+			}
+			i = 0
+		}
+		t.routes = slices.Delete(t.routes, i, i+1)
+	}
 }
 
 // update changes a route under the lock.
@@ -298,6 +347,7 @@ func (t *trace) update(r *Route, f func(r *Route)) {
 			c.Order = append([]Weighed(nil), r.Order...)
 			c.Left = append([]Weighed(nil), r.Left...)
 			c.Tries = append([]Try{}, r.Tries...)
+			c.Usage = append([]RouteUsage(nil), r.Usage...)
 			go saveRoute(c)
 		}
 	}
@@ -323,6 +373,7 @@ func (s *Server) Trace(ctx context.Context, after int64, wait time.Duration) Tra
 				c.Order = append([]Weighed(nil), r.Order...)
 				c.Left = append([]Weighed(nil), r.Left...)
 				c.Tries = append([]Try{}, r.Tries...)
+				c.Usage = append([]RouteUsage(nil), r.Usage...)
 				st.Routes = append(st.Routes, c)
 			}
 		}
@@ -348,3 +399,13 @@ func (s *Server) Trace(ctx context.Context, after int64, wait time.Duration) Tra
 // swapped reports whether served is another model than sent: not the same
 // name, however dated, pinned or prefixed (usage.Swapped).
 func swapped(sent, served string) bool { return usage.Swapped(sent, served) }
+
+// routeUsage retains only what pricing needs, without another copy of the
+// request's metadata. Unknown token counts have no price, including failures.
+func routeUsage(id, model string, u Usage) []RouteUsage {
+	if u.Input+u.Output == 0 {
+		return nil
+	}
+	return []RouteUsage{{Provider: id, Model: model, Input: u.Input, Output: u.Output,
+		CacheRead: u.CacheRead, CacheWrite: u.CacheWrite, Reasoning: u.Reasoning}}
+}

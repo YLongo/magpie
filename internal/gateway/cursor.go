@@ -202,7 +202,7 @@ func (s *Server) serveCursor(w http.ResponseWriter, r *http.Request, from provid
 	req.Model = model
 	ask := s.askCursor(model)
 	if req.WebSearch && !searching(r.Context()) {
-		if _, _, ok := searcher(); ok {
+		if canSearch() {
 			return s.searchReply(w, r, from, "Cursor", req, usage, ask)
 		}
 	}
@@ -436,8 +436,8 @@ func cursorMessages(r *Request, tools []bridgeTool) [][]byte {
 					}
 				case ToolCall:
 					var args any = map[string]any{}
-					if len(p.Args) > 0 {
-						json.Unmarshal(p.Args, &args)
+					if json.Valid(p.Args) {
+						args = json.RawMessage(p.Args)
 					}
 					content = append(content, map[string]any{"type": "tool-call", "toolCallId": cursorCallID(p.ID), "toolName": cursorCall,
 						"args": map[string]any{"namespace": "magpie", "toolName": p.Name, "arguments": args}})
@@ -493,9 +493,8 @@ func indexOf(ids []string, id string) int {
 // cursorResult is a tool's result, as the model is shown it.
 func cursorResult(id, text string, isError bool) map[string]any {
 	var result any = text
-	var j any
-	if json.Unmarshal([]byte(text), &j) == nil {
-		result = j
+	if json.Valid([]byte(text)) {
+		result = json.RawMessage(text)
 	}
 	r := map[string]any{"type": "tool-result", "toolCallId": cursorCallID(id), "toolName": cursorCall, "result": result,
 		"experimental_content": []any{map[string]any{"type": "text", "text": text}}}

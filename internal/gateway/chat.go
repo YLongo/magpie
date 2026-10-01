@@ -506,7 +506,7 @@ func (u cUsage) usage() Usage {
 func (u Usage) chat() map[string]any {
 	in := u.prompt()
 	return map[string]any{"prompt_tokens": in, "completion_tokens": u.Output, "total_tokens": in + u.Output,
-		"prompt_tokens_details":     map[string]any{"cached_tokens": u.CacheRead},
+		"prompt_tokens_details":     map[string]any{"cached_tokens": u.CacheRead, "cache_write_tokens": u.CacheWrite},
 		"completion_tokens_details": map[string]any{"reasoning_tokens": u.Reasoning}}
 }
 
@@ -515,6 +515,7 @@ func (u Usage) chat() map[string]any {
 type chatDecoder struct {
 	started bool
 	tool    int    // index of the open tool call, -1 for none
+	toolID  string // id of the open tool call, as some relays repeat it on every fragment
 	choice  string // index of the first choice seen; an empty string means none yet
 	// Gemini's OpenAI-compatible API, asked for thoughts, may give them
 	// in the text as a leading <thought>…</thought>: lead holds the text
@@ -650,11 +651,14 @@ func (d *chatDecoder) decode(data string, emit func(Event)) error {
 			if tc.Index != nil {
 				idx = *tc.Index
 			}
-			if tc.ID != "" || tc.Function.Name != "" || idx != d.tool {
-				if idx != d.tool || tc.ID != "" {
-					d.tool = idx
-					emit(Event{Kind: KToolStart, ID: tc.ID, Name: tc.Function.Name})
-				}
+			// A delta carrying the id the open call already goes by — some
+			// relays repeat it on every fragment, where the spec sends it
+			// only on the first — or one more fragment of the open index,
+			// continues that call; only a new id or a new index starts the
+			// next one.
+			if idx != d.tool || (tc.ID != "" && tc.ID != d.toolID) {
+				d.tool, d.toolID = idx, tc.ID
+				emit(Event{Kind: KToolStart, ID: tc.ID, Name: tc.Function.Name})
 			}
 			if tc.Function.Arguments != "" {
 				emit(Event{Kind: KToolArgs, Text: tc.Function.Arguments})
@@ -796,12 +800,16 @@ func (e *chatEncoder) event(ev Event) {
 	case KError:
 		failed := map[string]any{"message": ev.Text, "type": "api_error"}
 		if ev.Code != "" {
-			failed["code"] = ev.Code // a refusal, for the next account to be asked
+			failed["code"] = ev.Code // preserve the upstream error type, including refusals
 		}
 		e.w.event("", map[string]any{"error": failed})
 	}
 	e.col.add(ev)
 }
+
+// keepalive is an SSE comment, as OpenAI-compatible servers keep a Chat
+// Completions stream alive; its readers skip one.
+func (e *chatEncoder) keepalive() { e.w.comment("keepalive") }
 
 func (e *chatEncoder) finish() {
 	if !e.started {

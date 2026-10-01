@@ -1,13 +1,13 @@
 package gateway
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"slices"
 	"strings"
 	"time"
+
+	"github.com/yetone/magpie/internal/provider"
 )
 
 // ---- OpenAI Responses -------------------------------------------------------
@@ -99,17 +99,10 @@ func searchFound(tools []rTool) string {
 	return "These tools are now available to call: " + strings.Join(names, ", ")
 }
 
-// flatName is the name a namespaced tool is offered to a model under, which
-// takes one flat name: namespace__name, as Codex names an MCP server's tools.
-// A name longer than the 64 characters APIs allow is cut and made unique by
-// a hash of the whole.
+// flatName is the name a namespaced tool is offered to a model under,
+// namespace__name, the same a Grok subscription is offered it under.
 func flatName(namespace, name string) string {
-	flat := namespace + "__" + name
-	if len(flat) <= 64 {
-		return flat
-	}
-	sum := sha256.Sum256([]byte(namespace + "\x00" + name))
-	return flat[:55] + "_" + hex.EncodeToString(sum[:4])
+	return provider.FlatName(namespace, name)
 }
 
 type rRequest struct {
@@ -684,6 +677,17 @@ func callTo(item map[string]any, name string, named map[string]nsTool) map[strin
 	return item
 }
 
+// itemPrefix is the prefix of a call item's id, by its type: OpenAI turns
+// away a tool_search_call whose id isn't a tsc_ one ("Invalid
+// 'input[98].id': 'fc_…'. Expected an ID that begins with 'tsc'"), and
+// Codex hands the item back to it when the conversation goes there.
+func itemPrefix(item map[string]any) string {
+	if item["type"] == "tool_search_call" {
+		return "tsc_"
+	}
+	return "fc_"
+}
+
 func (e *responsesEncoder) send(typ string, fields map[string]any) {
 	fields["type"] = typ
 	fields["sequence_number"] = e.seq
@@ -692,11 +696,14 @@ func (e *responsesEncoder) send(typ string, fields map[string]any) {
 }
 
 func (e *responsesEncoder) response(status string, extra map[string]any) map[string]any {
-	out := map[string]any{"id": e.id, "object": "response", "created_at": e.created, "status": status,
-		"model": e.model, "output": e.output, "parallel_tool_calls": true, "tool_choice": "auto", "tools": []any{}}
-	if out["output"] == nil {
-		out["output"] = []any{}
+	// a list, never null, before any item: Muse Code refuses a stream whose
+	// response.created has output null (its nil slice in an any isn't nil)
+	output := e.output
+	if output == nil {
+		output = []map[string]any{}
 	}
+	out := map[string]any{"id": e.id, "object": "response", "created_at": e.created, "status": status,
+		"model": e.model, "output": output, "parallel_tool_calls": true, "tool_choice": "auto", "tools": []any{}}
 	for k, v := range extra {
 		out[k] = v
 	}
@@ -800,7 +807,8 @@ func (e *responsesEncoder) event(ev Event) {
 		}
 		// Open (and so close the previous item) before recording this call:
 		// closeItem reads the call ID from e.col.last(ToolCall).
-		e.openItem(ToolCall, "fc_", callTo(map[string]any{"type": "function_call", "call_id": ev.ID, "arguments": ""}, ev.Name, e.named))
+		item := callTo(map[string]any{"type": "function_call", "call_id": ev.ID, "arguments": ""}, ev.Name, e.named)
+		e.openItem(ToolCall, itemPrefix(item), item)
 		e.col.add(ev)
 		return
 	case KToolArgs:
@@ -817,6 +825,16 @@ func (e *responsesEncoder) event(ev Event) {
 		e.send("response.failed", map[string]any{"response": e.response("failed", map[string]any{"error": map[string]any{"code": code, "message": ev.Text}})})
 	}
 	e.col.add(ev)
+}
+
+// keepalive is response.in_progress again: Codex's idle timeout counts
+// events only, an SSE comment never reaching it, and skips this one.
+func (e *responsesEncoder) keepalive() {
+	if !e.started {
+		e.start(Event{}) // response.created and response.in_progress
+		return
+	}
+	e.send("response.in_progress", map[string]any{"response": e.response("in_progress", nil)})
 }
 
 func (e *responsesEncoder) finish() {
@@ -854,8 +872,10 @@ func renderResponses(res Result, model string, named map[string]nsTool) []byte {
 			if id == "" {
 				id = "call_" + newID()
 			}
-			output = append(output, callTo(map[string]any{"id": "fc_" + newID(), "type": "function_call", "status": "completed",
-				"call_id": id, "arguments": argsString(p)}, p.Name, named))
+			item := callTo(map[string]any{"type": "function_call", "status": "completed",
+				"call_id": id, "arguments": argsString(p)}, p.Name, named)
+			item["id"] = itemPrefix(item) + newID()
+			output = append(output, item)
 		}
 	}
 	id := res.ID

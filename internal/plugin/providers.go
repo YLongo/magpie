@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/yetone/magpie/internal/settings"
+	"github.com/yetone/magpie/internal/steady"
 )
 
 // Method is a way a plugin signs in: "oauth" (a browser, then a code
@@ -79,6 +80,9 @@ type Provider struct {
 	AuthType  string  `json:"authType"`
 	AccountID string  `json:"accountId"`
 	Models    []Model `json:"models"`
+	// FellBack says the plugin's models hook couldn't fetch its vendor's
+	// list and gave the default one back.
+	FellBack bool `json:"fellBack,omitempty"`
 	// Accounts are the accounts signed in to it, the one kept under its
 	// own id first; SignedIn, AuthType and AccountID are that one's.
 	Accounts []Account `json:"accounts"`
@@ -94,7 +98,8 @@ type Account struct {
 	Hint string `json:"hint,omitempty"`
 	// Models are the ids of the provider's models this account has, when
 	// the provider has more than one account; none, it has them all.
-	Models []string `json:"models,omitempty"`
+	Models   []string `json:"models,omitempty"`
+	FellBack bool     `json:"fellBack,omitempty"`
 }
 
 var (
@@ -125,17 +130,82 @@ func forgetProviders() {
 // need be, and keeps the answer for Cached.
 func Providers(ctx context.Context) ([]Provider, error) {
 	var ps []Provider
-	if err := Call(ctx, "providers", nil, &ps); err != nil {
+	if err := Call(ctx, "providers", map[string]any{"proxies": listingProxies()}, &ps); err != nil {
 		return nil, err
 	}
 	provMu.Lock()
+	ps = keepListed(ps, provCache)
 	ps = keepUnloaded(ps, provCache)
 	provCache, provGood = ps, true
 	provMu.Unlock()
 	if b, err := json.Marshal(ps); err == nil {
-		_ = os.WriteFile(providersPath(), b, 0o600)
+		_ = writeWhole(providersPath(), b)
 	}
 	return ps, nil
+}
+
+// ProxyFor is the proxy choice (netproxy.With's) of the provider's
+// account at key, or of the provider for key "": set by the providers
+// magpie keeps, which know them.
+var ProxyFor func(provider, key string) string
+
+// listingProxies are the proxies each provider's model list is asked
+// through, by provider and account key ("" the provider's own): a
+// built-in's list is fetched through the account's proxy, so a plugin's
+// is too.
+func listingProxies() map[string]map[string]string {
+	out := map[string]map[string]string{}
+	if ProxyFor == nil {
+		return out
+	}
+	var m map[string]json.RawMessage
+	if b, err := steady.ReadFile(AuthPath()); err == nil {
+		_ = json.Unmarshal(b, &m)
+	}
+	for k := range m {
+		id := ProviderOf(k)
+		if out[id] == nil {
+			out[id] = map[string]string{"": forHost(ProxyFor(id, ""))}
+		}
+		out[id][k] = forHost(ProxyFor(id, k))
+	}
+	return out
+}
+
+// keepListed is ps with a list a plugin fell back to replaced by the one
+// it told last: a built-in whose fetch fails keeps the list it fetched
+// last too, so a vendor's hiccup never shrinks the models to the plugin's
+// short defaults.
+func keepListed(ps, last []Provider) []Provider {
+	if last == nil {
+		if b, err := steady.ReadFile(providersPath()); err == nil {
+			_ = json.Unmarshal(b, &last)
+		}
+	}
+	was := map[string]Provider{}
+	for _, p := range last {
+		was[p.Spec+"\x00"+p.ID] = p
+	}
+	for i, p := range ps {
+		l, ok := was[p.Spec+"\x00"+p.ID]
+		if !ok {
+			continue
+		}
+		if p.FellBack && !l.FellBack && len(l.Models) > 0 {
+			ps[i].Models, ps[i].FellBack = l.Models, false
+		}
+		for j, a := range p.Accounts {
+			if !a.FellBack {
+				continue
+			}
+			for _, b := range l.Accounts {
+				if b.Key == a.Key && !b.FellBack && len(b.Models) > 0 {
+					ps[i].Accounts[j].Models, ps[i].Accounts[j].FellBack = b.Models, false
+				}
+			}
+		}
+	}
+	return ps
 }
 
 // keepUnloaded is ps with the providers last known of an installed
@@ -145,7 +215,7 @@ func Providers(ctx context.Context) ([]Provider, error) {
 // why, rather than going as if it were removed.
 func keepUnloaded(ps, last []Provider) []Provider {
 	if last == nil {
-		if b, err := os.ReadFile(providersPath()); err == nil {
+		if b, err := steady.ReadFile(providersPath()); err == nil {
 			_ = json.Unmarshal(b, &last)
 		}
 	}
@@ -180,11 +250,25 @@ func UseCached(ps []Provider) {
 // refreshing is Cached's refreshes in the background.
 var refreshing sync.WaitGroup
 
+// Refreshed waits for Cached's refreshes in the background to end, the
+// host left running: for tests that watch the providers' list on disk.
+func Refreshed() { refreshing.Wait() }
+
 // Settle waits for Cached's refreshes to end, then stops the host: for
 // tests, whose folders the host runs in go when they end.
 func Settle() {
 	refreshing.Wait()
 	Restart()
+	// and no host goes on finishing its calls in a folder going away
+	hostMu.Lock()
+	hs := make([]*host, 0, len(retiring))
+	for h := range retiring {
+		hs = append(hs, h)
+	}
+	hostMu.Unlock()
+	for _, h := range hs {
+		h.stop()
+	}
 }
 
 // Cached is the plugins' providers as last asked, without starting the
@@ -197,7 +281,7 @@ func Cached() []Provider {
 	good := provGood
 	provMu.Unlock()
 	if ps == nil {
-		if b, err := os.ReadFile(providersPath()); err == nil {
+		if b, err := steady.ReadFile(providersPath()); err == nil {
 			_ = json.Unmarshal(b, &ps)
 		}
 	}
@@ -302,7 +386,7 @@ func firstNonEmpty(ss ...string) string {
 
 func readAuth() map[string]storedAuth {
 	var m map[string]storedAuth
-	if b, err := os.ReadFile(AuthPath()); err == nil {
+	if b, err := steady.ReadFile(AuthPath()); err == nil {
 		_ = json.Unmarshal(b, &m)
 	}
 	return m
@@ -433,7 +517,7 @@ func SignOut(ctx context.Context, provider, account string) error {
 		return Call(ctx, "signOut", map[string]any{"provider": provider, "account": account}, nil)
 	}
 	var m map[string]json.RawMessage
-	b, err := os.ReadFile(AuthPath())
+	b, err := steady.ReadFile(AuthPath())
 	if err != nil {
 		return nil
 	}
@@ -446,7 +530,7 @@ func SignOut(ctx context.Context, provider, account string) error {
 		}
 	}
 	b, _ = json.MarshalIndent(m, "", "  ")
-	if err := os.WriteFile(AuthPath(), append(b, '\n'), 0o600); err != nil {
+	if err := writeWhole(AuthPath(), append(b, '\n')); err != nil {
 		return err
 	}
 	changed()
@@ -482,7 +566,7 @@ func LoaderOptions(ctx context.Context, provider, account string) (Options, erro
 	if ok {
 		return o, nil
 	}
-	if err := Call(ctx, "load", map[string]any{"provider": provider, "account": account}, &o); err != nil {
+	if err := Call(ctx, "load", map[string]any{"provider": provider, "account": account, "proxy": proxyOf(ctx)}, &o); err != nil {
 		return Options{}, err
 	}
 	optMu.Lock()
@@ -540,7 +624,7 @@ func Check(ctx context.Context, provider, account string) (Checked, error) {
 // Auths are provider's sign-ins as plugin-auth.json keeps them, by key.
 func Auths(provider string) map[string]map[string]any {
 	var m map[string]map[string]any
-	if b, err := os.ReadFile(AuthPath()); err == nil {
+	if b, err := steady.ReadFile(AuthPath()); err == nil {
 		_ = json.Unmarshal(b, &m)
 	}
 	out := map[string]map[string]any{}

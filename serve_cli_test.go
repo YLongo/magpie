@@ -1,6 +1,7 @@
 package main
 
 import (
+	"os"
 	"strings"
 	"testing"
 
@@ -12,6 +13,7 @@ import (
 // not shared from Settings is open to anyone who reaches it.
 func TestKeyNote(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
+	t.Setenv("USERPROFILE", os.Getenv("HOME"))
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	for _, c := range []struct{ addr, want string }{
 		{"", "only listens on localhost"},
@@ -27,12 +29,16 @@ func TestKeyNote(t *testing.T) {
 			t.Errorf("MAGPIE_ADDR=%q: %q", c.addr, n)
 		}
 	}
-	if err := settings.Save(settings.Settings{LAN: true, LANKey: "sk-magpie-k"}); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("MAGPIE_ADDR", "0.0.0.0:3425")
-	if n := keyNote(); !strings.Contains(n, "Share on local network") {
-		t.Error("shared:", n)
+	for _, key := range []string{"", "sk-magpie-k"} {
+		if err := settings.Save(settings.Settings{LAN: true, LANKey: key}); err != nil {
+			t.Fatal(err)
+		}
+		for _, addr := range []string{"", "0.0.0.0:3425"} {
+			t.Setenv("MAGPIE_ADDR", addr)
+			if n := keyNote(); !strings.Contains(n, "gateway key") || strings.Contains(n, "only listens on localhost") {
+				t.Error("shared:", n)
+			}
+		}
 	}
 }
 
@@ -40,6 +46,7 @@ func TestKeyNote(t *testing.T) {
 // the gateway: MAGPIE_PUBLIC_URL when a container sets it.
 func TestShareLines(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
+	t.Setenv("USERPROFILE", os.Getenv("HOME"))
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	t.Setenv("MAGPIE_ADDR", "0.0.0.0:3425")
 	t.Setenv("MAGPIE_PUBLIC_URL", "http://192.168.1.20:3425/")

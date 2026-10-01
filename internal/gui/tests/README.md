@@ -1,5 +1,66 @@
 # Dropdown browser regression
 
+## Gateway Caller Keys
+
+`gateway-caller-keys.test.cjs` checks the named caller-key list on the
+Gateway page, including creation, copying, renaming, disabling, enabling,
+rotation and deletion. It verifies key-level usage overview, request filtering and
+CSV export in Chinese and English on Chromium and WebKit. The fixtures do
+not access local credentials. Gateway keys appear only while sharing is on, with one create entry point
+and confirmation before rotation/removal (Cancel and Escape send no mutation).
+Creation, renaming and confirmation focus their controls without scrolling.
+Gateway is the only key-management page;
+Settings controls sharing and shows addresses. The test checks that toggling
+sharing retains the key, and that a removed default key is recreated as
+Magpie and appears in Gateway without a reload.
+
+`gateway-connect-keys.test.cjs` selects loopback and LAN addresses and enabled
+caller keys for Shell, curl, Python and Node examples across all four APIs.
+It checks rotation, disabling, removal, stale list responses, empty states,
+literal custom names and narrow layouts in Chinese and English on both engines.
+Sharing off keeps the original API-key field and hides the gateway-key picker;
+sharing on names the arbitrary local option separately from the Magpie key.
+
+`api-key-usage.test.cjs` exercises the existing provider key list: adding,
+enabling and disabling, choosing the first key, renaming and removing.
+The Usage page's Gateway key rows, request filter and CSV exports identify
+client keys, not those provider credentials. A client using different
+upstream keys stays grouped together; renaming an upstream key does not
+rename the client. It also checks historical records, Chinese and English,
+and the narrow window in Chromium and WebKit.
+The API fixtures use test keys and never read local user configuration.
+The existing `usage-ledger.test.cjs` also checks request-route and caller-key
+filters together, CSV export, and restoring the previous caller filter when
+the request filter is cleared. A caller absent from the period's options clears
+the filter and reloads the unfiltered rows from the first page.
+
+`api-key-theme.test.cjs` checks Gateway's enabled and disabled keys, creation
+and renaming inputs, rotation and key picker, plus Settings' LAN address
+controls against the global palette.
+Light and Dark override the OS; System follows live OS palette changes.
+The settings theme picker is also switched and reloaded in Chromium and
+WebKit. No separate colours are defined for gateway keys.
+
+```sh
+node --test --test-concurrency=1 internal/gui/tests/gateway-caller-keys.test.cjs internal/gui/tests/gateway-connect-keys.test.cjs internal/gui/tests/api-key-usage.test.cjs internal/gui/tests/api-key-theme.test.cjs
+```
+
+## Other Browser Regressions
+
+`routing-sessions.test.cjs` checks the Routing request list in Chromium and
+WebKit, English and Chinese: the list defaults to By request and remembers
+the grouping choice across reloads; sessions are separated by agent and ID across
+model changes, known and partial costs are summed, zero partial estimates
+retain their amount and +, single-request headings use the singular, zero prices stay known,
+title helpers merge only into their explicit parent (even arriving first),
+late chat names and renames update while preserving folds and ID tooltips,
+missing IDs and old unpriced requests remain visible, folded sessions stay
+folded through live updates, costs follow the currency choice, and the original
+time-ordered list, history selection and routing story still work. It also
+checks the request list at 1440 and 560 pixels. Run with
+`node --test internal/gui/tests/routing-sessions.test.cjs` and the same
+Playwright environment described below. APIs are isolated fixtures.
+
 `session-terminal.test.cjs` checks the macOS Settings choice for installed
 `.command` handlers in English and Chinese. The system default appears once
 and is selected at first. It selects Ghostty, changes the theme, then returns
@@ -27,11 +88,22 @@ sign-in with pasteCallback shows) in a narrow Chinese
 dark window: invalid input remains editable, retry reaches the callback route,
 and a pending or accepted submission cannot be submitted twice.
 
+`plugin-updates.test.cjs` checks the dot on Plugins while a plugin's update
+waits for the reader, gone once it's updated, and the "Auto-updated" chip on a
+plugin magpie updated by itself.
+
 `plugin-signin.test.cjs` checks a provider an OpenCode plugin signs in to:
 the add sheet lists it under "From plugins"; its sign-in asks the way, the
 method's questions (a pick, then a text the plugin checks), then takes the
 code the browser page shows; an API-key way opens the account. English and
 Chinese, Chromium and WebKit, with the API faked.
+
+`plugin-move-overflow.test.cjs` checks a Plugins card that offers a
+built-in's accounts ("Move my 1 Grok (SuperGrok) account"): the button has a
+row of its own at the card's foot, so it stays inside the card and the
+plugin's name and "magpie community" aren't cut, in a three-, two- and
+one-column window. English and Chinese, Chromium and WebKit, with the API
+faked.
 
 `plugin-key-hint.test.cjs` checks a plugin's API-key way: its label titles
 the key's field and its placeholder is the field's hint, while a way labelled
@@ -43,9 +115,9 @@ suggested plugins in their two sections, a card installs its plugin and
 then offers its sign-in, which opens in the Providers add sheet; a search
 filters the list at once and adds what npm has; a card opens the plugin's
 page with its README (no pictures, links opened outside); Installed shows
-why one didn't load, updates one and removes one. The providers list's
-"More subscriptions in Plugins" button and the add sheet's row and "look
-for a plugin" link lead there. English and Chinese, Chromium and WebKit,
+why one didn't load, updates one and removes one. The add sheet's
+"More in Plugins" row (the providers list has no button of its own) and
+"look for a plugin" link lead there. English and Chinese, Chromium and WebKit,
 with the API faked.
 
 `panel-fold.test.cjs` expands and collapses on the Agents page with the list
@@ -98,6 +170,15 @@ small model, which doesn't follow the model, stays a picker.
 scrolled: its fields hide, the head keeps the base URL and a copy button, the
 head stays where it was, and the fold is remembered across a reload.
 
+`sse-body.test.cjs` opens streamed replies in the Gateway page's recent
+calls (Anthropic Messages, Chat Completions with `[DONE]`, OpenAI Responses cut
+before it completed): the response body reads as each event's data
+pretty-printed under its name, as the reply put together (text, reasoning, tool
+calls with their arguments as objects, how it stopped, usage) or as it came,
+the pick remembered. A 450-event stream draws 200 at a time from a button under
+the box that stays where it is, the page too; a body that isn't a stream is as
+before. English and Chinese, Chromium and WebKit.
+
 `routing-kind.test.cjs` lists calls Codex makes for itself (a guardian review,
 a title, memories, a turn on Luna Reserve, a kind it does not know yet): each
 has a grey tag by its model in the Requests list, in English and Chinese, the
@@ -117,12 +198,32 @@ under way, one with two tries, in Chromium and WebKit, English and Chinese, at
 text is drawn over another (#273: in two columns of ~470px it sat on the time
 taken).
 
+`routing-effort-change.test.cjs` lists live requests whose reasoning was
+changed on the way ("· medium → low", "· medium → xhigh", one under way, one
+picked for the turn) beside "15 s · TTFT 14 s · 6.9k tokens", with one further
+down whose numbers run long (three tries, minutes, a million tokens), in
+Chromium and WebKit, English and Chinese, in the dark theme, at widths from
+1440 down to 400px, and again with the styles as Safari 15 reads them (no
+subgrid, no container queries). In every row the reasoning stays within where
+it went and no run of text is drawn over another (#435, azir12345: 文字重叠 —
+the numbers' column, as wide as the longest numbers, left the reasoning next to
+no room and it ran over them); where it went and the level asked for are cut
+first, and the level sent is always whole.
+
 `routing-levels.test.cjs` edits a group's reasoning levels in Chromium and
 WebKit, English and Chinese (#295: a member with low/high/max took medium and
 xhigh from the rest). "Its models' shared" names those levels; "Named" shows a
 toggle per level, starting from the shared ones, and toggling them moves
 nothing; saved, they go lowest first and the group's family stays. A group with
 its own opens on them, none picked is refused, and back to shared saves none.
+
+`group-member-fast.test.cjs` sends a group's member in its vendor's fast mode,
+in Chromium and WebKit, English and Chinese (vs on Discord: "gpt-6.1 sol ·
+high · fast"). The group's card reads "· fast" after the member's reasoning; in
+the editor a model with a fast mode shows a "Standard speed"/"Fast" toggle
+beside its reasoning and one without none, toggling moves nothing on the page,
+a member whose reasoning changes stays fast under its new id, one taken out
+leaves it, and the save sends the members sent fast as fast.
 
 `routing-manual.test.cjs` routes a group by hand in Chromium and WebKit,
 English and Chinese (#317: pick the model, as CC Switch picks a provider). A
@@ -139,6 +240,15 @@ under the model's dated name and ones naming none: only the first is marked
 gpt-6-sol · served gpt-6-luna" in its story, in English and Chinese, and the
 click that picks it leaves the page where it is.
 
+`remote-group-served.test.cjs` lists a request sent to a remote magpie for one
+of its routing groups (group/auto-deepseek-v4-1-flash answered by
+deepseek/deepseek-v4.1-flash) beside a real swap: the group's member is shown
+plain, not amber, in the Routing page's Requests list, with a title (and a
+line in its story) saying the remote magpie's group routed the request there,
+and muted with the same title in the Usage page's Requests, while the swap
+stays amber; Chromium and WebKit, English and Chinese, and the click that
+picks it leaves the page where it is.
+
 `routing-reroute-title.test.cjs` lists a request the plan's account rate
 limited and a relay took, and one answered on its first try: the rerouted
 one's title names the relay and its model, as its row does, then the account
@@ -147,9 +257,15 @@ Routing tab alike; the other keeps "agent · model → provider". English and
 Chinese, Chromium and WebKit (#337).
 
 `plain-names.test.cjs` checks the Settings page's "Provider in model names"
-row (#335): on by default, Off posts `settings/plain-names` with `on: true`
+row (#335): on by default, Off posts `settings/plain-names` with `mode: "off"`
 on its own and lights Off, On posts it back, and neither click scrolls the
 page. English and Chinese, Chromium and WebKit.
+
+`model-suffix-own.test.cjs` checks that row's third way (#92): "Not on names
+I set" (自定义名称不带供应商) between Off and On, lit by `plainOwnNames`; On and
+then it post `settings/plain-names` with `mode: "on"` and `mode: "own"`,
+neither click scrolls the page, the hint isn't cut short and the three fit
+the row at 900px and 560px. English and Chinese, Chromium and WebKit.
 
 `routing-steady.test.cjs` scrolls the Routing page down to its routing groups,
 opens one in its editor and types into its name, then streams six requests in
@@ -301,8 +417,28 @@ login/forget once per account and the line goes; in English and Chinese.
 `nokey-editor.test.cjs` opens two local Ollama providers saved with no key,
 one from the preset and one custom, as /api/providers gives them: a click
 on each row opens its editor (the key box saying one is optional) and
-nothing throws, where the row only toggled; in Chromium and WebKit, English
-and Chinese.
+nothing throws, where the row only toggled. A plugin's provider (base
+plugin://codearts) has no link in its editor's head, where it said
+"codearts ↗" and opened https://codearts (Lemon on Discord), while the
+Ollamas keep theirs; in Chromium and WebKit, English and Chinese.
+
+`editor-short-window.test.cjs` opens a provider's editor with 40 models in a
+short window (800x500, 600x420, 420x340; 悠悠哥 on Discord: a small window's
+WorkBuddy editor stopped part way down its models): the dialog fits the
+window with its head and Save in sight and uncovered, and the wheel held
+over the model chips runs them to the last one and then takes the editor's
+body on to its end, where the chips' held ends stopped it; the page never
+moves. In Chromium and WebKit, English and Chinese.
+
+`group-from-model-add.test.cjs` opens the Routing page on a new group made
+from a model (?newgroup=, as "Make a routing group of it" does; 悠悠哥 on
+Discord: "Hy4 preview" did nothing on Add in a small window). Each label
+sits beside its field, where a hidden classifier's empty cell put Levels'
+label at the right and its choices under the labels; the wheel reaches Add,
+uncovered, and Add posts the group, where its draft had no fast members and
+Add threw. A save the server refuses shows its error in sight, the editor
+stays, and a second Add is posted, where the button stayed busy. At 600x420
+and 1000x700, in Chromium and WebKit, English and Chinese.
 
 `old-webkit.test.cjs` holds the page to Safari 15.0, the WebKit macOS 12 can
 have (#220: a regex lookbehind in app.js, a syntax error before Safari 16.4,
@@ -340,6 +476,12 @@ filters shown with no page and says where the file went. At the window's
 narrowest (560) the table scrolls in its box and no tab scrolls the page
 sideways; no left-border stripe; in English and Chinese, light and dark.
 
+`usage-ledger.test.cjs` also follows a request from Usage to its routing
+story and back to every usage row sharing that route ID. It checks archived
+routes with no live gateway, cleared history, rows recorded before IDs were
+kept, clearing the route filter and exporting it, in Chromium and WebKit,
+English and Chinese.
+
 `sessions-overview.test.cjs` checks the Usage page's Sessions overview: six
 figures (sessions with their median and p90, tokens, cost, cache read, active
 time, projects with the top one's share), the range as bars up to 100 days
@@ -352,6 +494,86 @@ messages and output tokens, the session shape by messages, minutes and
 autonomy (remembered, the page left where it was), tool use (the top tools,
 their kinds and weeks) and the top skills with their last use, agents and
 projects.
+
+`sessions-bar-names.test.cjs` checks the Sessions overview's bar rows
+(projects, models, tools and skills: a name, a bar, figures): at 1600 wide
+every long name is shown whole, each card's bars start at one place and are
+at least 5em, at 420 wide the long names are shortened while no bar is under
+5em and nothing runs past its card, and wide again the names are whole; in
+Chromium and WebKit, English and Chinese.
+
+`sessions-calendar-fill.test.cjs` checks that the Sessions overview's activity
+calendar fills its card: 118 days (17 weeks) at 1400 wide take over 90% of
+it, the weeks before the range coming in as empty cells without tooltips, the
+cells square and the month names over their weeks; at 1000 and 560 wide the
+weeks before are fewer and nothing runs past the card, narrower still there
+are none and the cells shrink, and wide again they come back; in Chromium and
+WebKit, English and Chinese.
+
+`usage-ledger-detail.test.cjs` opens the Requests tab's rows: a failure the
+gateway logged shows its status and the vendor's error type in the row and,
+opened, what the vendor said with the request's id and endpoint; a call read
+from an agent's session file carries a "session log" mark, says "Succeeded" or
+the error that ended it, and says in its details that the file records no
+status; its models are the one asked for, the one sent as asked and the one that answered, its effort is there, and its time is about (≈) what the file's stamps tell. A click opens and closes a row without moving the page, Enter and Space
+do the same, text selected in the details is not a click, and the rows stay open
+when the list is asked for again; in English and Chinese.
+
+`usage-ledger-chart.test.cjs` opens the Requests tab on what its requests add
+up to: a strip of four totals (tokens, requests, cost, the cache hit rate),
+then the trend of one metric — tokens, cost or requests — as columns by the
+hour, each told apart by provider, agent or model and standing on the bottom
+line in its hour's slot, beside a ranking of the same that is the chart's
+legend. The pointer over a column shows what each had of it, over a ranked one
+the others fade; a click on a provider or an agent in the ranking, or the
+provider picker beside the agent's, lists only its requests while the ranking
+keeps the others in sight; the metric and the split are remembered; a click
+moves nothing. At 560 the ranking goes under the chart and the totals two to a
+row, a wider window redraws it, a metric with no price says so, and with no
+request listed there is nothing; in English and Chinese, light and dark.
+
+`usage-chart-axis.test.cjs` checks the usage chart's side labels, in the
+window's Requests tab (1180 and 560 wide) and the tray panel's Usage tab (440
+and 340 wide): for tokens, cost in dollars and in yuan, and requests, small and
+large ("8000 万", "125 亿", "¥2000"), each label starts no further out than the
+card's padding, as far in as the tabs above it, ends before the plot, and
+nothing runs past the card or scrolls the page sideways; Chromium and WebKit,
+English and Chinese.
+
+`number-units.test.cjs` checks Settings' Number units (John on Discord): in
+Chinese the Requests tab says a large count in 万 and 亿 ("15.4 亿", an axis's
+"8000 万") by default; picking K / M / B saves westernUnits, moves nothing on
+the settings page, and the totals and chart axis then say "1.54B" and "80M"
+while the page stays Chinese, after a reload and in the tray panel too, each
+label still ending before the plot. In English the row is hidden and counts are
+K / M / B anyway; Chromium and WebKit.
+
+`panel-usage.test.cjs` opens the tray panel's Usage tab: the totals, a small
+chart and a ranking of five at most for today, seven or thirty days, the
+metric switch, and a click on a provider (or the picker) that switches to it —
+its models then tell the chart apart. A click on a control in sight leaves the
+panel where it is, Open Usage takes the window to that provider's requests,
+and the window opened so has the Requests tab with that provider and agent
+picked and an address without them. Nothing is cut off at 320, where the
+totals go two to a row; available allowances keep their tab; in English and Chinese.
+
+`usage-refresh.test.cjs` sets the Usage page's refresh period, with a clock in
+place of time: every 5 s to begin with and no read before that, the picker's
+five (off, 5 s, 10 s, 30 s, a minute), off reading no more, a minute reading at
+its end and not at half of it, the button beside it reading at once, turning
+while it does and saying when in its title, on Overview the summary and the
+allowances too, and the choice remembered by the next window; in English and
+Chinese.
+
+`usage-ledger-content.test.cjs` opens the rows of the Requests tab on what was
+said in them, read from the agent's session file when the row is opened: loading,
+then the input and the output as parts (who said each, a tool's call with its
+name), the reasoning and the agent's own context folded, a long part showing some
+of itself and unrolling, what is left off a part or the whole said; a gateway
+request is asked for by its session and the span it took, a call of a session file
+at its own time; a request the files can't tell says why (no session, an agent whose
+files aren't read, no such call); a row opened again, or the list read anew, asks no
+more; the details fit the table's box at 560; in English and Chinese.
 
 `shared-skills.test.cjs` opens the Library's Skills tab with skills found in
 the user-wide `~/.agents/skills` (#227): one row for a skill there that
@@ -373,6 +595,23 @@ name at once, the rows go and the toast says "3 skills are in the library
 now", or names the one that couldn't be brought in, which stays listed; the
 click scrolls nothing; in English and Chinese, with `/api/plugins` faked.
 
+`every-skill.test.cjs` opens the Library's Skills tab with three skills and
+three agents that take skills, and one that doesn't (#443): Turn all on
+beside "In the library" posts the three agents with on, at once, and every
+chip is lit; Turn all off asks in the page first (a browser dialog fails the
+test), Cancel posts nothing, and its own button posts them with off and no
+chip is lit; each button is greyed once there's nothing for it to do; the
+clicks scroll nothing; Chromium and WebKit, in English and Chinese, with
+`/api/plugins` faked.
+
+`header-centre.test.cjs` sweeps a Windows window from 1100 to 560 points at
+text size 100, 110 and 125%, with an Update pill waiting (emo172, #442): the
+header's tabs never touch the buttons; whenever they aren't in the row
+they're in the middle of the window, and the closer-together tabs are tried
+there before the row; in the row they have as much room either side, give or
+take the header's padding against the gap before the buttons; Chromium and
+WebKit, in English and Chinese, with `/api/plugins` faked.
+
 `own-skill.test.cjs` opens the Library with Claude Code's own impeccable in
 the library skill's way (StringKe, JasonLeeForOnly on Discord): the warning
 row says so in the reader's language and has "Use the library's" and "Keep
@@ -388,6 +627,14 @@ scrolled while a faked `/api/set` takes 2.5s to answer: the row shows the
 new model at once, in the window and in the tray panel's opened row and its
 line, the page left where it was; the answer keeps it and says so; a refused
 pick puts the old model back with the reason; in English and Chinese.
+
+`claude-direct.test.cjs` shows Claude Code with `"model": "sonnet"` in its
+settings.json: the row reads the alias as the model it stands for, with
+Claude's logo; its tooltip says a model Claude Code asks Anthropic for
+itself isn't through magpie, so settings.json names no magpie endpoint, and
+picking one says "straight to Anthropic"; a magpie model says neither, and
+no pick moves the scrolled page. Chromium and WebKit, in English and
+Chinese.
 
 `omarchy.test.cjs` holds Omarchy's look to Omarchy: with no Omarchy theme in
 boot.js the page has no omarchy class or theme style, shows the Appearance
@@ -408,11 +655,37 @@ the first's, and the footer names the model. The right-click neither picks
 the chip nor moves the page, Esc closes the menu only, and Test models still
 asks every model. The API is faked.
 
+`sessions-manage.test.cjs` opens the Sessions page (TJHHHH on Discord): an
+agent's sessions by the folder they ran in, the latest folder open, each with
+its resume command; unfolding a folder, opening a row and picking a session
+leave the page where it is. Delete asks in magpie's own dialog (a browser
+`confirm()` fails the test), Cancel sends nothing, Delete posts the ids
+picked to sessions/delete, a session still being written to is said so, the
+Trash lists what went and Restore posts its key; an agent whose sessions
+magpie can't delete (OpenCode) shows no delete. No left-border accent, every
+string in Chinese. Chromium and WebKit, English and Chinese, API faked.
+
 `routing-wb-refused.test.cjs` opens a request WorkBuddy refused "from an
 unapproved channel" (Codex's system prompt, #182) on the Routing page: the
 vendor's words are given without the hint the gateway adds, and the hint is
 on its own line in English and Chinese; another 400 gets none, and picking
 the request leaves the page where it is. Chromium and WebKit, API faked.
+
+`routing-blocked.test.cjs` opens a request a vendor's edge firewall blocked
+(Alibaba Cloud's 405 page in front of zcode.z.ai) on the Routing page: what
+the gateway made of it is given without the hint it adds, and the hint (the
+firewall blocked this IP; wait, or switch network or proxy) is on its own
+line in English and Chinese; another 405 gets none, and picking the request
+leaves the page where it is. Chromium and WebKit, API faked.
+
+`routing-zcode-blocked.test.cjs` opens a request ZCode's Start Plan turned
+away (#425: 405 "request has been blocked due to unusual activity") on the
+Routing page: what the gateway made of it is given without the hint it adds,
+and the hint (ZCode takes only its own app's requests and magpie doesn't
+pretend to be it, or the network blocked this IP; use a GLM Coding Plan or
+another provider in the group) is on its own line in English and Chinese;
+another 405 gets none, and picking the request leaves the page where it is.
+Chromium and WebKit, API faked.
 
 `routing-shape.test.cjs` opens a group request whose first member answered
 422 because its API couldn't read the request (#350: SuperGrok and Codex's
@@ -440,8 +713,20 @@ works as follows, in English and Chinese:
 - Save posts `s3://bucket/prefix`, the access key as the user and the
   secret as the password, together with the endpoint, region and path-style.
   The row then reads "S3 sync" with the bucket and server.
-- Edit opens the form with S3 picked and the fields as saved. The secret
-  field is empty, with "saved" as its placeholder.
+- Edit opens the form with S3 picked, marked "S3 · on", and the fields as
+  saved. The secret field is empty, with "saved" as its placeholder.
+
+`sync-other-kind.test.cjs` checks that moving sync between WebDAV and S3
+keeps the other's settings (ARNO on Discord: trying S3 wiped the WebDAV
+address, user and password). With S3 synced to and a WebDAV server kept,
+the row ends "WebDAV settings kept", the form marks S3 "on" and says the
+WebDAV settings are kept; picking WebDAV, which leaves the page where it
+was, shows the kept address and user, the password as saved, says saving
+moves sync there and the button reads "Move sync to WebDAV". Saving posts
+that server with the password left empty for the one kept, and the row
+then reads "WebDAV sync", "S3 settings kept". English and Chinese,
+Chromium and WebKit, API faked. Before the fix the WebDAV fields were
+empty and nothing said which was on or kept.
 
 `webdav-settings-refresh.test.cjs` checks the Settings page's sync row
 against a setup changed behind the window (#305: magpie webdav / magpie s3
@@ -500,6 +785,17 @@ posts the address to the sign-in's callback route once, and the account is
 named in the status line. Nothing scrolls. The checks run in English and
 Chinese, in Chromium and WebKit.
 
+`signin-paste-key.test.cjs` checks Command Code signed in to from a browser
+that can't reach magpie (on a server, in Docker), where Command Code's page
+posts its key to magpie unseen and leaves no address to paste. While the
+sign-in waits, the box says to make an API key on Command Code's keys page,
+a link opens that page, and a hidden API key field sits inside the box with
+no left-border accent; Finish sign-in posts the key once to the sign-in's
+callback route. A plugin's browser sign-in offers "Use an API key instead"
+while it waits: the click cancels it and asks the plugin's API key way.
+Nothing scrolls. The checks run in English and Chinese, in Chromium and
+WebKit.
+
 `tray-inuse.test.cjs` checks Settings, Usage in the menu bar. A
 subscription with two accounts lists "Account in use" before each account;
 one with a single account does not. Ticking it saves `claude|*`, the pill
@@ -543,7 +839,14 @@ Chromium and WebKit.
 of the levels offered (omp at auto, an agent with none set): the slider shows
 it as it is ("auto", "default"; 自动 in Chinese) at a stop of its own, a touch
 there posts nothing — it had shown the lowest level and a touch wrote it —
-and the next stop is the lowest level. Chromium and WebKit.
+and the next stop is the lowest level. A level past the ones offered (max,
+the levels going to high) stands after high, both ends reading "low … max"
+(低 … 最高) rather than "max … high", and a touch on it posts nothing. The
+effort icon and the panel's bars light as far as the slider's stop goes: max
+past high all of them, medium between low and high two of three. auto, none
+and the default light no bar, where minimal lights one, and none is no level
+to count: Hermes at low, second of five, lights one of three. Chromium and
+WebKit.
 
 `claude-effort.test.cjs` checks Claude Code's effort and ultracode by its
 model (#352, #353, #354): Opus 5.5's row has an ultracode square, and Opus
@@ -575,6 +878,12 @@ the last one open picked, its rows in outline that come in only after a
 moment; a tab picked while waiting shows its own outline and stays picked;
 the Library folder waits. When the library comes the outline goes, the tabs
 get their counts and don't move.
+
+`provider-typed.test.cjs` tries a key pasted over a provider's saved one
+before a Save: Refresh, Test models, a model's own test and the endpoints'
+Test send the editor's form with `typed: true`, the editor stays open with
+the key still typed, nothing is saved; a new key's box focuses the key and
+its name says it is optional. In English and Chinese, Chromium and WebKit.
 
 `usage-alert.test.cjs` sets the usage alerts (#368) on the Settings page:
 "Usage alert" and "Low balance alert" start Off; On saves 80% (and 5 for a
@@ -612,16 +921,110 @@ container's own and to set `MAGPIE_PUBLIC_URL`. Outside a container nothing
 changes. No coloured left border; English and Chinese, Chromium and WebKit,
 with `/api/plugins` faked.
 
+`routing-time.test.cjs` checks a routing group's rule for hours of the day
+(Discord: send a provider's peak-price hours, DeepSeek's or GLM's, to
+another). The group's rule and the trace read it as its hours and days
+(22:00–08:00 Mon–Fri; 周一–周五 22:00–08:00); in the editor the hours are two
+times typed into one pill, a click on it types the first and moves nothing,
+past midnight is noted, a time that isn't one is marked once left, the days
+are picked like the agents (weekdays, then Saturday too: Mon–Sat), and the
+rule is saved as `time: {from, to, days}`. English and Chinese, Chromium and
+WebKit, with `/api/plugins` faked.
+
+`unlisted-models.test.cjs` checks a provider set to "Only through routing
+groups" (只通过路由分组使用; 悠悠哥 on Discord: hy4 vanished from the pickers).
+The model picker's filter, finding such a model, says why it isn't offered:
+hy3, in the group Mine, is reached by picking Mine ("Pick Mine" sets it);
+hy4, in no group, can't be used, and "Make a routing group of it" opens the
+Routing page on a new group of it, added with `members: ["hunyuan/hy4"]`.
+The provider's editor names its models in no group under the tick (not once
+unticked), each a click from a group; `?view=routing&newgroup=` opens the
+window on one, and the tray panel asks `window/main` for it. The page doesn't
+move, no left-border accent; English and Chinese, Chromium and WebKit.
+
+`request-archive.test.cjs` turns the Gateway page's request archive on and
+off: off unless turned on, refused with sync not set up with an s3:// bucket
+(the reason in the footer, the switch left off), on with one, the bucket said.
+A call the archive kept shows its date and id under its bodies; "Fetch from
+archive" reads `archive?date=&id=` and shows the request's and response's
+headers and bodies with secrets taken out, a call not uploaded yet says so
+and can be asked again, and a call it didn't keep has nothing of it. No click
+moves the page; no left-border accent. English and Chinese, Chromium and
+WebKit, with `/api/plugins` faked.
+
+`providers-off-fold.test.cjs` checks that providers switched off are kept
+apart (01huadalang on Discord): the Providers list holds the ones on, and the
+ones off sit below it under a "Turned off (N)" fold (已关闭的供应商), folded at
+first. Opening it with the page scrolled leaves the head and the page where
+they are, the fold is remembered across a reload, and a provider switched
+off moves under it. English and Chinese, Chromium and WebKit, with
+`/api/plugins` faked.
+
+`account-return.test.cjs` checks the accounts of Codex after magpie signed
+it in to another because the first was all but used up (#408: 智能路由会自动把
+所使用账号设为首选). The account it stands in on says "First for now" (暂为首选),
+its title naming the one it goes back to, and that one "First again once it
+has room" (额度恢复后切回首选); with nothing to go back to, the account Codex
+is on is just "First". The Routing note says magpie moves back. The page
+doesn't move; English and Chinese, Chromium and WebKit.
+
+`signin-again.test.cjs` checks a sign-in to an account magpie lists
+already (#413: WorkBuddy's page offers the account WorkBuddy is signed in
+to). Adding another WorkBuddy account comes back done with `again`: the
+status says it is already listed and its sign-in renewed (该账号已在列表中，
+已更新登录), not "added"; a new account still says added. The page doesn't
+move; English and Chinese, Chromium and WebKit.
+
+`web-page.test.cjs` checks the page `magpie web` serves to a browser (Jorben
+on Discord: no request archive switch and no usage chart icons in the remote
+web UI, and a 404 for `/wails/runtime.js`). With `web` set the page never
+asks for `/wails/runtime.js`, which the browser has none of, and nothing
+fails to load; the app's window still loads it. The Gateway page's request
+archive switch is there and posts `settings/archive` without moving the
+page, and the Usage page's chart draws its columns with each provider's icon
+in its ranking. English and Chinese, Chromium and WebKit, with the API and
+`/api/plugins` faked. Go's `TestPageFilesRevalidate` checks that the page's
+files go out with `Cache-Control: no-cache` and an ETag of their content, so
+a cache in front of `magpie web` can't keep an older version's `app.js`.
+
+`balance-parts.test.cjs` checks a custom provider's balance card (#420): a
+balance field with several amounts shows each on a line of its own, the
+user's label quiet and the first amount the larger, "Balance" only where no
+label was given; a percent is a meter, amber from 90%. Each card says when it
+was read ("Updated 3 minutes ago", 3分钟前更新), or "As of … — couldn't be
+read just now" (截至 …，暂时无法获取最新用量) when it stands in for a reading
+that failed, windows' cards too; the menu bar panel's Balances show the same
+amounts, the meter and "As of" (截至). One amount reads as it did. No
+left-border accent, nothing runs out of a card; English and Chinese, Chromium
+and WebKit, `/api/plugins` faked.
+
+`search-api.test.cjs` checks Settings' Web search section (#419: a search API
+of one's own for when no provider can search). It lists the search APIs in
+the order they are tried and has a row to add one: picking SearXNG asks for
+its address, Add posts `{vendor, key, url}`, an API that needs a key sends
+nothing without one, a key magpie refuses is said in the row with the API
+and what was typed kept, and Remove posts `{vendor, remove: true}`. No click
+moves the page. English and Chinese, Chromium and WebKit, with `/api/plugins`
+faked.
+
+`provider-file-error.test.cjs` checks a providers.json that is there but
+can't be read (#415's review): the Providers page says over the list that the
+file can't be read (无法读取供应商配置文件), was left unchanged and is to be
+fixed or moved aside, with magpie's reason; the Add sheet doesn't open as for
+a first use, a signed-in account still listed stays under it, and a file that
+reads shows none of it. English and Chinese, Chromium and WebKit, with
+`/api/plugins` faked.
+
 With Node.js and Playwright available:
 
 ```sh
-node --test internal/gui/tests/menu-scroll.test.cjs internal/gui/tests/click-scroll.test.cjs internal/gui/tests/panel-fold.test.cjs internal/gui/tests/rollup-short.test.cjs internal/gui/tests/panel-routing.test.cjs internal/gui/tests/gateway-fold.test.cjs internal/gui/tests/routing-kind.test.cjs internal/gui/tests/balance-fix.test.cjs internal/gui/tests/cli-update.test.cjs internal/gui/tests/login-import.test.cjs internal/gui/tests/agy-launch.test.cjs internal/gui/tests/currency.test.cjs internal/gui/tests/usage-ledger.test.cjs internal/gui/tests/update-check.test.cjs internal/gui/tests/omarchy.test.cjs internal/gui/tests/brand.test.cjs internal/gui/tests/library-loading.test.cjs node --test internal/gui/tests/signin-callback.test.cjs internal/gui/tests/routing-steady.test.cjs internal/gui/tests/old-webkit.test.cjs internal/gui/tests/session-terminal.test.cjs internal/gui/tests/text-size.test.cjs internal/gui/tests/zcode-site.test.cjs internal/gui/tests/rail-tip.test.cjs internal/gui/tests/sync-update.test.cjs internal/gui/tests/plugin-signin.test.cjs internal/gui/tests/plugin-market.test.cjs internal/gui/tests/s3-sync.test.cjs internal/gui/tests/routing-wb-refused.test.cjs internal/gui/tests/routing-shape.test.cjs internal/gui/tests/market-have.test.cjs internal/gui/tests/sessions-today.test.cjs internal/gui/tests/routing-side-calls.test.cjs internal/gui/tests/import-all-skills.test.cjs internal/gui/tests/routing-flood.test.cjs internal/gui/tests/routing-busy.test.cjs internal/gui/tests/own-skill.test.cjs internal/gui/tests/routing-manual.test.cjs internal/gui/tests/tray-usages.test.cjs internal/gui/tests/provider-remove.test.cjs internal/gui/tests/signin-link.test.cjs internal/gui/tests/tray-inuse.test.cjs internal/gui/tests/codex-auto-reset.test.cjs internal/gui/tests/routing-auto-reset.test.cjs internal/gui/tests/claude-usage-asked.test.cjs internal/gui/tests/claude-risk.test.cjs internal/gui/tests/library-toggle-status.test.cjs internal/gui/tests/library-all.test.cjs internal/gui/tests/routing-reroute-title.test.cjs internal/gui/tests/plain-names.test.cjs internal/gui/tests/panel-effort.test.cjs internal/gui/tests/agent-models-all-hidden.test.cjs internal/gui/tests/omp-roles.test.cjs internal/gui/tests/claude-effort.test.cjs internal/gui/tests/remote-magpie.test.cjs internal/gui/tests/qoder-cn-tile.test.cjs internal/gui/tests/provider-levels-scroll.test.cjs internal/gui/tests/signin-paste-codex.test.cjs internal/gui/tests/usage-alert.test.cjs internal/gui/tests/quota-families.test.cjs internal/gui/tests/provider-search.test.cjs internal/gui/tests/webdav-settings-refresh.test.cjs internal/gui/tests/lan-docker.test.cjs internal/gui/tests/plugin-key-hint.test.cjs internal/gui/tests/update-hide.test.cjs internal/gui/tests/tray-logos.test.cjs internal/gui/tests/routing-proxy.test.cjs
+node --test internal/gui/tests/menu-scroll.test.cjs internal/gui/tests/click-scroll.test.cjs internal/gui/tests/panel-fold.test.cjs internal/gui/tests/rollup-short.test.cjs internal/gui/tests/panel-routing.test.cjs internal/gui/tests/gateway-fold.test.cjs internal/gui/tests/routing-kind.test.cjs internal/gui/tests/balance-fix.test.cjs internal/gui/tests/cli-update.test.cjs internal/gui/tests/login-import.test.cjs internal/gui/tests/agy-launch.test.cjs internal/gui/tests/currency.test.cjs internal/gui/tests/usage-ledger.test.cjs internal/gui/tests/update-check.test.cjs internal/gui/tests/omarchy.test.cjs internal/gui/tests/brand.test.cjs internal/gui/tests/library-loading.test.cjs internal/gui/tests/provider-typed.test.cjs node --test internal/gui/tests/signin-callback.test.cjs internal/gui/tests/routing-steady.test.cjs internal/gui/tests/old-webkit.test.cjs internal/gui/tests/session-terminal.test.cjs internal/gui/tests/text-size.test.cjs internal/gui/tests/zcode-site.test.cjs internal/gui/tests/rail-tip.test.cjs internal/gui/tests/sync-update.test.cjs internal/gui/tests/plugin-signin.test.cjs internal/gui/tests/plugin-market.test.cjs internal/gui/tests/s3-sync.test.cjs internal/gui/tests/routing-wb-refused.test.cjs internal/gui/tests/routing-blocked.test.cjs internal/gui/tests/routing-zcode-blocked.test.cjs internal/gui/tests/routing-shape.test.cjs internal/gui/tests/market-have.test.cjs internal/gui/tests/sessions-today.test.cjs internal/gui/tests/routing-side-calls.test.cjs internal/gui/tests/import-all-skills.test.cjs internal/gui/tests/routing-flood.test.cjs internal/gui/tests/routing-busy.test.cjs internal/gui/tests/own-skill.test.cjs internal/gui/tests/routing-manual.test.cjs internal/gui/tests/tray-usages.test.cjs internal/gui/tests/provider-remove.test.cjs internal/gui/tests/signin-link.test.cjs internal/gui/tests/tray-inuse.test.cjs internal/gui/tests/codex-auto-reset.test.cjs internal/gui/tests/routing-auto-reset.test.cjs internal/gui/tests/claude-usage-asked.test.cjs internal/gui/tests/claude-risk.test.cjs internal/gui/tests/library-toggle-status.test.cjs internal/gui/tests/library-all.test.cjs internal/gui/tests/routing-reroute-title.test.cjs internal/gui/tests/plain-names.test.cjs internal/gui/tests/panel-effort.test.cjs internal/gui/tests/agent-models-all-hidden.test.cjs internal/gui/tests/omp-roles.test.cjs internal/gui/tests/claude-effort.test.cjs internal/gui/tests/remote-magpie.test.cjs internal/gui/tests/qoder-cn-tile.test.cjs internal/gui/tests/provider-levels-scroll.test.cjs internal/gui/tests/signin-paste-codex.test.cjs internal/gui/tests/signin-paste-key.test.cjs internal/gui/tests/usage-alert.test.cjs internal/gui/tests/quota-families.test.cjs internal/gui/tests/provider-search.test.cjs internal/gui/tests/webdav-settings-refresh.test.cjs internal/gui/tests/lan-docker.test.cjs internal/gui/tests/plugin-key-hint.test.cjs internal/gui/tests/update-hide.test.cjs internal/gui/tests/tray-logos.test.cjs internal/gui/tests/routing-proxy.test.cjs internal/gui/tests/sse-body.test.cjs internal/gui/tests/remote-group-served.test.cjs internal/gui/tests/plugin-move-overflow.test.cjs internal/gui/tests/routing-time.test.cjs internal/gui/tests/unlisted-models.test.cjs internal/gui/tests/plugin-updates.test.cjs internal/gui/tests/request-archive.test.cjs internal/gui/tests/group-member-fast.test.cjs internal/gui/tests/providers-off-fold.test.cjs internal/gui/tests/account-return.test.cjs internal/gui/tests/usage-ledger-detail.test.cjs internal/gui/tests/usage-ledger-chart.test.cjs internal/gui/tests/usage-chart-axis.test.cjs internal/gui/tests/panel-usage.test.cjs internal/gui/tests/usage-refresh.test.cjs internal/gui/tests/usage-ledger-content.test.cjs internal/gui/tests/claude-direct.test.cjs internal/gui/tests/signin-again.test.cjs internal/gui/tests/sessions-calendar-fill.test.cjs internal/gui/tests/editor-short-window.test.cjs internal/gui/tests/group-from-model-add.test.cjs internal/gui/tests/sync-other-kind.test.cjs internal/gui/tests/web-page.test.cjs internal/gui/tests/balance-parts.test.cjs internal/gui/tests/search-api.test.cjs internal/gui/tests/provider-file-error.test.cjs internal/gui/tests/sessions-manage.test.cjs internal/gui/tests/number-units.test.cjs internal/gui/tests/sessions-bar-names.test.cjs internal/gui/tests/model-suffix-own.test.cjs internal/gui/tests/routing-effort-change.test.cjs internal/gui/tests/every-skill.test.cjs internal/gui/tests/header-centre.test.cjs
 ```
 
 If Playwright is installed outside the repository, set `NODE_PATH` to the
 directory containing its package. The suite uses Playwright's Chromium and
 WebKit binaries (`playwright install chromium webkit`). No frontend dependency
-is needed by the app itself. Tested with Playwright 1.63.0.
+is needed by the app itself. Tested with Playwright 1.62.1.
 
 For the callback test, `PLAYWRIGHT_CHANNEL=chrome` uses an installed Chrome
 instead of Playwright's Chromium.
@@ -629,3 +1032,18 @@ instead of Playwright's Chromium.
 Set `BROWSER=chromium` or `BROWSER=webkit` for one engine. Set `ARTIFACT_DIR` to
 an external directory to retain screenshots and Playwright traces, including
 failed assertions. These browser checks run separately from `make test`.
+
+The request-ledger review regressions also cover the explicit data-source notes
+(including the exclusion of local rejections), the local-session label, and native
+panel fitting including Usage (with the desktop's 560px maximum). The detail
+and content tests, along with ledger pagination and filters, bring controls into sight through real wheel input before a
+click, so WebKit's wheel steps and the app's scroll protection do not fight
+Playwright's automatic scrolling. Empty allowances hide their panel tab.
+
+`session-identity.test.cjs` checks historical emails and recorded official vendors
+on session-log rows. Models and current configuration do not establish historical
+routes; session rows without routing evidence display "Local session", including
+with a known session creator. Unknown gateway providers retain their own label.
+Creator emails and recorded provider IDs appear separately in request details.
+Third-party OpenCode gateway calls retain the actual relay. These regressions
+run in Chromium and WebKit, English and Chinese.
