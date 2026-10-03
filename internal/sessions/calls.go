@@ -124,7 +124,7 @@ func DesktopDataDirs() []string { return callDesktopDirs() }
 func Calls(since time.Time) []Call { return callsFor(since, "") }
 
 func callsFor(since time.Time, session string) []Call {
-	files := callFiles()
+	files := callSources()
 	pruneCalls(files)
 	// Earlier files own messages copied into a resumed Claude session.
 	sort.Slice(files, func(i, j int) bool {
@@ -197,8 +197,13 @@ func callFiles() []file {
 		}
 	}
 	add(codexFiles())
+	add(wslFiles("claude", "codex"))
 	return out
 }
+
+// callSources are callFiles and OpenCode's sessions (#680), whose calls are
+// rows of its database or its JSON files rather than lines.
+func callSources() []file { return append(callFiles(), openCodeCallFiles()...) }
 
 // desktopDataDirs are Claude Desktop's Claude and Claude-3p folders on this
 // computer, found as desktopDirs in internal/agent's claudedesktop.go does
@@ -267,7 +272,7 @@ func headOf(path string) string {
 func prepareCalls(f file, old *callFile) *callFile {
 	head := headOf(f.path)
 	var st *callFile
-	if old != nil && f.size >= old.Size && old.Off <= f.size && sameHead(head, old.Head, old.HeadSize) && old.ContentHash != "" && prefixHash(f.path, old.Size) == old.ContentHash {
+	if old != nil && !packed(f.path) && f.size >= old.Size && old.Off <= f.size && sameHead(head, old.Head, old.HeadSize) && old.ContentHash != "" && prefixHash(f.path, old.Size) == old.ContentHash {
 		st = old.clone()
 	} else {
 		st = &callFile{Agent: f.agent}
@@ -694,7 +699,7 @@ type CallSource struct {
 }
 
 func CallSources() []CallSource {
-	fs := callFiles()
+	fs := callSources()
 	pruneCalls(fs)
 	out := make([]CallSource, 0, len(fs))
 	for _, f := range fs {

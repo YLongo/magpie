@@ -22,7 +22,7 @@ func fakeClaudeUsage(t *testing.T, out *atomic.Value, fail *atomic.Bool) *atomic
 	UsageClaudeVia(func(context.Context) (string, error) {
 		runs.Add(1)
 		if fail != nil && fail.Load() {
-			return "", errors.New("Claude Code: offline")
+			return "", errors.New("Claude Code: network is unreachable")
 		}
 		return out.Load().(string), nil
 	})
@@ -160,6 +160,18 @@ What's contributing to your limits usage?
 	// a time alone is the next one
 	if r, ok := claudeResetTime("3am (UTC)", now); !ok || !r.Equal(time.Date(2026, 10, 2, 3, 0, 0, 0, time.UTC)) {
 		t.Fatalf("time alone: %v %v", r, ok)
+	}
+	// Claude Code 2.1.285 on puts a comma where "at" was (#631)
+	for in, want := range map[string]time.Time{
+		"Oct 9, 2:59pm (UTC)":        time.Date(2026, 10, 9, 14, 59, 0, 0, time.UTC),
+		"Oct 2, 8pm (UTC)":           time.Date(2026, 10, 2, 20, 0, 0, 0, time.UTC),
+		"Jan 2, 9:05am (UTC)":        time.Date(2027, 1, 2, 9, 5, 0, 0, time.UTC),
+		"Jan 2, 2027, 9am (UTC)":     time.Date(2027, 1, 2, 9, 0, 0, 0, time.UTC),
+		"Oct 3, 2pm (Asia/Shanghai)": time.Date(2026, 10, 3, 14, 0, 0, 0, sh),
+	} {
+		if r, ok := claudeResetTime(in, now); !ok || !r.Equal(want) {
+			t.Errorf("%q: %v %v, want %v", in, r, ok, want)
+		}
 	}
 	if _, err := parseClaudeUsage("Error: not logged in", now); err == nil {
 		t.Fatal("nothing told, no error")

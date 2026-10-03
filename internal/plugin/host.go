@@ -29,6 +29,12 @@ import (
 //go:embed host.js
 var hostJS []byte
 
+// piJS loads pi's extensions as plugins; host.js imports it when a plugin
+// is pi's.
+//
+//go:embed pi.js
+var piJS []byte
+
 // message is a line the host writes.
 type message struct {
 	ID     int64           `json:"id"`
@@ -47,6 +53,7 @@ type message struct {
 	Message  string            `json:"message"`
 	Title    string            `json:"title"`
 	Variant  string            `json:"variant"`
+	Count    int               `json:"count"`
 }
 
 type call struct {
@@ -67,6 +74,9 @@ type host struct {
 	dead   chan struct{}
 	err    error
 	loaded []Loaded
+	// renewing is how many sign-ins the host is renewing: stop lets them
+	// end, their new tokens saved, before it kills the host
+	renewing atomic.Int32
 }
 
 // Loaded is how a plugin fared when the host loaded it.
@@ -190,30 +200,56 @@ func (h *host) alive() bool {
 	}
 }
 
+// stopWait is how long a stopped host has to finish its calls; while it
+// is renewing a sign-in it has up to stopRenewing in all, since a vendor
+// that rotates its refresh token has already spent the old one, and the
+// account is signed out unless the new one is saved.
+var (
+	stopWait     = 2 * time.Second
+	stopRenewing = 15 * time.Second
+)
+
 func (h *host) stop() {
 	h.in.Close()
+	start := time.Now()
+	wait := time.NewTimer(stopWait)
+	defer wait.Stop()
 	select {
 	case <-h.dead:
-	case <-time.After(2 * time.Second):
-		if h.cmd.Process != nil {
-			h.cmd.Process.Kill()
+		return
+	case <-wait.C:
+	}
+	tick := time.NewTicker(20 * time.Millisecond)
+	defer tick.Stop()
+	for h.renewing.Load() > 0 && time.Since(start) < stopRenewing {
+		select {
+		case <-h.dead:
+			return
+		case <-tick.C:
 		}
+	}
+	if h.cmd.Process != nil {
+		h.cmd.Process.Kill()
 	}
 }
 
 // hostFile is host.js written where Bun can run it.
-func hostFile() (string, error) {
-	sum := sha256.Sum256(hostJS)
+func hostFile() (string, error) { return hostScript("host", hostJS) }
+
+// hostScript is a script of the host written where Bun can run it, named
+// by what it holds.
+func hostScript(name string, js []byte) (string, error) {
+	sum := sha256.Sum256(js)
 	dir := filepath.Join(filepath.Dir(catalog.CachePath()), "plugin-host")
-	p := filepath.Join(dir, "host-"+hex.EncodeToString(sum[:6])+".js")
-	if b, err := os.ReadFile(p); err == nil && string(b) == string(hostJS) {
+	p := filepath.Join(dir, name+"-"+hex.EncodeToString(sum[:6])+".js")
+	if b, err := os.ReadFile(p); err == nil && string(b) == string(js) {
 		return p, nil
 	}
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return "", err
 	}
 	tmp := p + ".tmp"
-	if err := os.WriteFile(tmp, hostJS, 0o644); err != nil {
+	if err := os.WriteFile(tmp, js, 0o644); err != nil {
 		return "", err
 	}
 	return p, os.Rename(tmp, p)
@@ -267,6 +303,10 @@ func start(ctx context.Context) (*host, error) {
 // before it started.
 func startOn(ctx context.Context, bun string) (*host, bool, error) {
 	js, err := hostFile()
+	if err != nil {
+		return nil, false, err
+	}
+	pi, err := hostScript("pi", piJS)
 	if err != nil {
 		return nil, false, err
 	}
@@ -329,6 +369,7 @@ func startOn(ctx context.Context, bun string) (*host, bool, error) {
 	err = h.call(ictx, "init", map[string]any{
 		"authPath":      AuthPath(),
 		"modelsDevPath": catalog.Source(),
+		"piPath":        pi,
 		"directory":     settings.Dir(),
 		"config":        l.Config,
 		"plugins":       items,
@@ -385,6 +426,8 @@ func (h *host) dispatch(m message) {
 		switch m.Event {
 		case "auth":
 			changed()
+		case "renewing":
+			h.renewing.Store(int32(m.Count))
 		case "signIn":
 			onSignInMu.Lock()
 			f := onSignIn
@@ -476,9 +519,27 @@ func (h *host) call(ctx context.Context, method string, params, out any) error {
 
 // Call starts the host if need be and asks it method.
 func Call(ctx context.Context, method string, params, out any) error {
-	h, err := get(ctx)
+	return callWithTimeout(ctx, method, params, out, 0)
+}
+
+// Background listings allow the host its own startup budget. The optional
+// timeout begins only after initialization and bounds just the requested RPC.
+func callWithTimeout(ctx context.Context, method string, params, out any, timeout time.Duration) error {
+	startup := ctx
+	if timeout > 0 {
+		startup = context.WithoutCancel(ctx)
+	}
+	h, err := get(startup)
 	if err != nil {
 		return err
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, timeout)
+		defer cancel()
 	}
 	return h.call(ctx, method, params, out)
 }
@@ -560,8 +621,8 @@ func Fetch(ctx context.Context, r FetchRequest) (*http.Response, error) {
 	id, c := h.begin(true)
 	params := struct {
 		FetchRequest
-		Body string `json:"body,omitempty"`
-	}{r, base64.StdEncoding.EncodeToString(r.Body)}
+		Body []byte `json:"body,omitempty"`
+	}{r, r.Body}
 	if err := h.send(map[string]any{"id": id, "method": "fetch", "params": params}); err != nil {
 		h.forget(id)
 		return nil, err

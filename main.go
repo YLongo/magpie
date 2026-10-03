@@ -17,6 +17,7 @@ import (
 	"github.com/yetone/magpie/internal/gateway"
 	"github.com/yetone/magpie/internal/imagemcp"
 	"github.com/yetone/magpie/internal/netproxy"
+	"github.com/yetone/magpie/internal/proc"
 	"github.com/yetone/magpie/internal/profile"
 	"github.com/yetone/magpie/internal/provider"
 	"github.com/yetone/magpie/internal/sessions"
@@ -69,7 +70,7 @@ const usage = `magpie — one place to pick every agent's model
                                   which models an agent is shown: families (magpie provider/group set <id> family=…)
   magpie search [add <api> <key>|rm <api>]   Tavily, Brave, Exa, Firecrawl or SearXNG for web search when no provider can search
   magpie groups                   routing groups: several models agents pick as one, group/<id>
-  magpie group add <name> models=<m1>,<m2> [routing=smart|order|rotate|usage] [stays=auto|session|turn|off]
+  magpie group add <name> models=<m1>,<m2> [routing=smart|order|rotate|usage|pace] [stays=auto|session|turn|off]
   magpie group <id> | set <id> k=v… | rm <id>   show, change or remove one (magpie group help for more)
   magpie accounts [agent] [--json]  every subscription magpie knows, with each one's allowance used and when it resets
   magpie accounts add <agent>     sign in to one more Claude, ChatGPT or Google (Gemini CLI, Antigravity) subscription
@@ -85,9 +86,10 @@ const usage = `magpie — one place to pick every agent's model
   magpie serve                    run the gateway alone (the app runs it too)
   magpie healthcheck              exit 0 when the gateway answers (a container's HEALTHCHECK)
   magpie gateway-key list|add <name>|rotate <id>|remove <id>   manage the keys clients use to call a shared gateway
+  magpie gateway-key limit <id> [off|day|week|month --tokens N --cost USD --cache-reads]   a key's own limit, and what it used
   magpie mcp image                the image and video generation MCP server an agent is given from the library (stdio)
-  magpie usage [today|7d|30d|all] tokens and cost per agent and model (30d)
-  magpie usage --csv [today|7d|30d|all]   every request as CSV: the model asked for, sent and served, tokens, cost, time, status
+  magpie usage [today|7d|30d|all] tokens and cost per agent, model and subscription account (30d)
+  magpie usage --csv [--account <name>] [today|7d|30d|all]   every request as CSV (or one account's): the model asked for, sent and served, tokens, cost, time, status, account
   magpie sessions [--model <m>] [--folder <f>] [--json]   the latest Claude Code, Codex, OpenCode and Pi sessions, with what each cost
   magpie sessions --days N|today|all [--model <m>] [--folder <f>] [--json]
                                   what every session spent, day by day, with the top models and folders (7 days)
@@ -95,8 +97,9 @@ const usage = `magpie — one place to pick every agent's model
   magpie sync                     refresh the model catalog and vendor model lists
   magpie agents                   list every supported agent
   magpie update [check]           install the newest release (check: only say if there is one)
+  magpie update auto [on|off] [30m|1h|6h|24h]  whether the app looks for updates by itself, and how often (6h)
 
-agents: claude (cc), codex, gemini, opencode (oc), mimocode, pi, goose, cursor, copilot, crush
+agents: claude (cc), codex, gemini, opencode (oc), mimocode, pi, goose, cursor, zed, copilot, crush
 `
 
 var (
@@ -111,16 +114,27 @@ func main() {
 		// Claude Code, signing in for magpie, handed over the page to open
 		return
 	}
+	endProbesOnSignal()
 	gateway.Version = version
 	netproxy.Install()
 	update.GUI = hasGUI
 	err := run(os.Args[1:])
+	proc.EndProbes() // a CLI still being asked something isn't left to init
 	sessions.Saved() // the session index kept, for the next run
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "magpie:", err)
 		os.Exit(1)
 	}
 }
+
+// runTUI runs the TUI, which quits on Ctrl+C and SIGTERM itself once it
+// has started; it asks CLIs first, and a signal then ends those.
+func runTUI() error {
+	return tuiRun(ownSignals)
+}
+
+// tuiRun is tui.Run; a var so tests can stand in for it.
+var tuiRun = tui.Run
 
 func run(args []string) error {
 	if len(args) > 0 && args[0] == "healthcheck" {
@@ -140,6 +154,10 @@ func run(args []string) error {
 	gateway.StandIn = agent.StandIn
 	// the setup kept the same on every computer, by whichever serves
 	gateway.WhileServing = append(gateway.WhileServing, davsync.Run)
+	// and dsh's patch lists, which dsh reads live: a route left behind by
+	// something else writing the file fails every session there until
+	// magpie writes its own list again
+	gateway.WhileServing = append(gateway.WhileServing, agent.KeepDshWired)
 	// and the request archive, when it is on, goes to the bucket sync is to
 	gateway.ArchiveBucket = func() (gateway.Putter, bool) {
 		if b, ok := davsync.S3Bucket(); ok {
@@ -151,7 +169,7 @@ func run(args []string) error {
 		if hasGUI {
 			return runGUI(true, "")
 		}
-		return tui.Run()
+		return runTUI()
 	}
 	// a magpie:// link the system handed over (Windows, Linux): the app
 	// opens it for the user to confirm
@@ -163,7 +181,7 @@ func run(args []string) error {
 	}
 	switch args[0] {
 	case "tui":
-		return tui.Run()
+		return runTUI()
 	case "web":
 		return webCmd(args[1:])
 	case "app", "gui":

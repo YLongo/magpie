@@ -71,7 +71,7 @@ func TestProviderAndCallerIdentitiesRemainIndependent(t *testing.T) {
 			t.Fatal("missing or reordered identity columns", cells[0])
 		}
 	}
-	if !slices.Equal(cells[0][len(cells[0])-2:], columns[3:]) {
+	if !slices.Equal(cells[0][indexes[3]:indexes[4]+1], columns[3:]) {
 		t.Fatal("provider columns must precede caller columns", cells[0])
 	}
 	for i, row := range rows {
@@ -134,7 +134,7 @@ func TestPackedRequestPageCallerAndRouteIdentity(t *testing.T) {
 		}
 	}
 	requestCache.Lock()
-	packed := len(requestCache.gateway.Archive) > 0
+	packed := len(readLogSnapshot().blocks[0].Archive) > 0
 	requestCache.Unlock()
 	if !packed {
 		t.Fatal("test must exercise a compressed gateway snapshot")

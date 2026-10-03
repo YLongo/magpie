@@ -18,6 +18,8 @@ import (
 
 	"github.com/pelletier/go-toml/v2"
 	"github.com/tidwall/jsonc"
+
+	"github.com/yetone/magpie/internal/agentenv"
 )
 
 // sandbox is a home with every agent magpie can give the library to, and
@@ -38,7 +40,17 @@ func sandbox(t *testing.T) string {
 	roots := piGlobalRoots
 	piGlobalRoots = func() []string { return nil }
 	t.Cleanup(func() { piGlobalRoots = roots })
-	for _, k := range []string{"CLAUDE_CONFIG_DIR", "CODEX_HOME", "PI_CODING_AGENT_DIR", "OMO_CODING_AGENT_DIR", "SENPI_CODING_AGENT_DIR", "PI_CONFIG_DIR", "OMP_PROFILE", "PI_PROFILE", "COPILOT_HOME", "APPDATA", "LOCALAPPDATA", "DSH_HOME", "HERMES_HOME", "KIMI_CODE_HOME", "KIMI_SHARE_DIR", "GROK_HOME", "FACTORY_HOME_OVERRIDE", "CLINE_DIR", "CLINE_DATA_DIR", "CLINE_MCP_SETTINGS_PATH", "QODER_CONFIG_DIR", "QODERCN_CONFIG_DIR"} {
+	// a terminal's PATH is the test's, never the developer's login shell's
+	up := userPath
+	userPath = func() []string { return filepath.SplitList(os.Getenv("PATH")) }
+	t.Cleanup(func() { userPath = up })
+	for _, k := range agentenv.Vars {
+		t.Setenv(k, "")
+	}
+	t.Setenv("APPDATA", "")
+	t.Setenv("LOCALAPPDATA", "")
+	// never the developer's own GitHub token, sent to a fake GitHub
+	for _, k := range GitHubTokenEnv {
 		t.Setenv(k, "")
 	}
 	for _, f := range []string{
@@ -1078,6 +1090,42 @@ func TestEverySkillAgents(t *testing.T) {
 		}
 	}
 	if _, err := EverySkillAgents(nil, true); err == nil {
+		t.Error("no agents named was taken")
+	}
+}
+
+// Every server on for one agent at once, and off again; the others keep
+// theirs, and an agent isn't given a server it can't reach (#475).
+func TestEveryServerAgents(t *testing.T) {
+	h := sandbox(t)
+	ok(t)(SaveServer("", Server{Name: "fs", Transport: "stdio", Command: "fs", Agents: []string{"claude"}}))
+	ok(t)(SaveServer("", Server{Name: "web", Transport: "sse", URL: "http://localhost:9/sse", Agents: []string{"claude"}}))
+	ok(t)(EveryServerAgents([]string{"codex"}, true))
+	agents := func() map[string][]string {
+		v, _ := Read(nil)
+		m := map[string][]string{}
+		for _, s := range v.Servers {
+			m[s.Name] = s.Agents
+		}
+		return m
+	}
+	if m := agents(); !slices.Equal(m["fs"], []string{"claude", "codex"}) || !slices.Equal(m["web"], []string{"claude"}) {
+		t.Errorf("on for codex: %v", m)
+	}
+	if c := read(t, filepath.Join(h, ".codex/config.toml")); !strings.Contains(c, "[mcp_servers.fs]") || strings.Contains(c, "web") {
+		t.Errorf("codex's config:\n%s", c)
+	}
+	ok(t)(EveryServerAgents([]string{"claude"}, false))
+	if m := agents(); !slices.Equal(m["fs"], []string{"codex"}) || len(m["web"]) != 0 {
+		t.Errorf("off for claude: %v", m)
+	}
+	if c := read(t, filepath.Join(h, ".claude.json")); strings.Contains(c, `"fs"`) || strings.Contains(c, `"web"`) {
+		t.Errorf("claude still has them:\n%s", c)
+	}
+	if !strings.Contains(read(t, filepath.Join(h, ".codex/config.toml")), "[mcp_servers.fs]") {
+		t.Error("codex, not named, lost fs")
+	}
+	if _, err := EveryServerAgents(nil, false); err == nil {
 		t.Error("no agents named was taken")
 	}
 }

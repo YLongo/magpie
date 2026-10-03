@@ -1,5 +1,14 @@
 package gateway
 
+// PLUGIN-SERVED (see AGENTS.md): Qoder ("qoder") and Qoder CN ("qoder-cn")
+// are deprecated built-in subscriptions served by their plugin,
+// @magpie-community/opencode-qoder-auth, each once moved onto it
+// (provider.Moved; the default for a new sign-in). A moved one's
+// sign-ins, models, requests and usage are all the plugin's, never this
+// code's (only the move, in migrate*.go, still reads its accounts). A fix here alone doesn't reach those users; fix the plugin
+// (github.com/magpie-community/plugins, packages/qoder) and raise the
+// movers' min in internal/provider/migrate_qoder.go.
+
 import (
 	"bufio"
 	"cmp"
@@ -121,7 +130,7 @@ func relayStatus(w http.ResponseWriter, from provider.Protocol, name string, req
 			return fail(Event{Text: name + " ended without an answer"})
 		}
 		sw := newSSEWriter(w)
-		enc := encoder(from, sw, req)
+		enc := encoder(from, sw, req, usage)
 		var failed string
 		see := func(ev Event) bool {
 			if ev.Kind == KStart || ev.Kind == KUsage {
@@ -157,7 +166,7 @@ func relayStatus(w http.ResponseWriter, from provider.Protocol, name string, req
 	usage.add(res.Usage)
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(200)
-	w.Write(render(from, res, req))
+	w.Write(renderUsage(from, res, req, usage))
 	return 200, ""
 }
 

@@ -31,6 +31,7 @@ import (
 	"fmt"
 	"hash"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"os/exec"
@@ -57,9 +58,19 @@ type subscriptionBridge struct {
 // A run left for its conversation's next turn waits idleLongest at most,
 // and idleMost of them are kept, the longest waiting let go first: each is
 // a Claude Code process.
+//
+// It waits as long as the prompt cache it wrote lasts: on a subscription
+// within its limits Claude Code writes Anthropic's cache for an hour
+// (claudeCacheTTL, with its CLAUDE_CODE_PROMPT_CACHE_TTL unset), and a run
+// let go sooner has its conversation told to a new one in one message, a
+// prefix the cache has never seen, so the whole of it is written again
+// while what the old run wrote is still there to read (#463: a turn
+// after 39 minutes idle wrote the conversation again). Past the hour the cache is gone
+// either way, and the run would only hold a process.
 const (
-	idleLongest = 20 * time.Minute
-	idleMost    = 6
+	claudeCacheTTL = time.Hour
+	idleLongest    = claudeCacheTTL
+	idleMost       = 6
 )
 
 // parkLongest is how long a run started anew for each turn (Cursor)
@@ -92,6 +103,9 @@ type subscriptionRun struct {
 	cmd    *exec.Cmd
 	tree   *proc.Tree // cmd once started, with all it starts
 	tmp    string
+	// schema says the client asked for an answer fitting a JSON schema,
+	// which Claude Code gives as its StructuredOutput call
+	schema bool
 
 	// the tools its agent was told of, as it started and since
 	tools map[string]bool
@@ -111,6 +125,15 @@ type subscriptionRun struct {
 	idleKey string
 	idleAt  time.Time
 	convKey string
+
+	// effort is the level its Claude Code thinks at, as it started (its
+	// --effort) or was told since (setEffort); "" is Claude Code's own
+	effort string
+
+	// told is the conversation as the client had it in its last request
+	// here (historyKey): tool results are the run's while the client's
+	// conversation goes on from that one.
+	told string
 
 	// An agent whose stream does not carry its tool calls in full (Cursor)
 	// learns of them here, as the MCP helper hands each one over, and opens
@@ -278,6 +301,9 @@ func (b *subscriptionBridge) start(ctx context.Context, req *Request, model, con
 		"magpie": map[string]any{"command": exe, "args": []string{"claude-mcp-helper", callback, toolsPath}},
 	}})
 	args := claudeCLIArgs(model, string(mcpConfig), req.Effort, req.WebSearch)
+	if len(req.Schema) > 0 {
+		args = append(args, "--json-schema", string(req.Schema))
+	}
 	cmd := proc.CommandContext(context.Background(), binary, args...)
 	cmd.Dir = tmp
 	cmd.Env = netproxy.EnvWith(claudeProxy(ctx), cleanClaudeEnv(os.Environ()))
@@ -298,7 +324,7 @@ func (b *subscriptionBridge) start(ctx context.Context, req *Request, model, con
 		return nil, nil, err
 	}
 
-	run := &subscriptionRun{bridge: b, token: token, model: model, cmd: cmd, tmp: tmp, pending: map[string]chan mcpToolResult{}, stdin: stdin, owner: owner}
+	run := &subscriptionRun{bridge: b, token: token, model: model, cmd: cmd, tmp: tmp, schema: len(req.Schema) > 0, pending: map[string]chan mcpToolResult{}, stdin: stdin, owner: owner, effort: req.Effort}
 	// A caller may abandon a turn after receiving tool_use. Do not leave the
 	// parked Claude process and MCP request alive forever.
 	run.timer = time.AfterFunc(30*time.Minute, run.abort)
@@ -368,11 +394,35 @@ func (b *subscriptionBridge) resume(req *Request, owner string) (*subscriptionRu
 	run.segment = ch
 	run.mu.Unlock()
 	run.timer.Reset(30 * time.Minute)
+	// a turn the router picked another effort for (#502) goes on in the
+	// same Claude Code, told the level first: it asks the next turn at it
+	// in output_config alone, the conversation it wrote to the cache
+	// untouched, where a run started anew is told it in one message, a
+	// prefix the cache has never seen
+	if req.Effort != run.effort {
+		if err := run.setEffort(req.Effort); err != nil {
+			run.abort()
+			return nil, nil
+		}
+	}
 	if _, err := run.stdin.Write(append(line, '\n')); err != nil {
 		run.abort()
 		return nil, nil
 	}
 	return run, ch
+}
+
+// setEffort tells the run's Claude Code to think at effort from its next
+// turn, as its SDK's applyFlagSettings does: a control request, answered
+// with a control_response its output is read past.
+func (r *subscriptionRun) setEffort(effort string) error {
+	line, _ := json.Marshal(map[string]any{"type": "control_request", "request_id": "effort-" + randomToken()[:12],
+		"request": map[string]any{"subtype": "apply_flag_settings", "settings": map[string]any{"effortLevel": effort}}})
+	if _, err := r.stdin.Write(append(line, '\n')); err != nil {
+		return err
+	}
+	r.effort = effort
+	return nil
 }
 
 // retire lets go of the runs left waiting at an earlier point of this
@@ -507,11 +557,13 @@ func (r *subscriptionRun) park() {
 // to be found again: whom it runs as, the model, its settings and tools,
 // and the messages' words, tool calls and results. Whitespace, thinking and
 // how a reply is split into messages are left out, as clients keep those
-// differently.
+// differently. Its effort is not in it, only whether it asked for one: a
+// run is told another level as its turn starts (setEffort), where one
+// started anew would write the whole conversation to the cache again (#502).
 func turnKey(owner string, req *Request, msgs []Message) string {
 	h := sha256.New()
 	tools, _ := json.Marshal(req.Tools)
-	fmt.Fprintf(h, "%s\x00%s\x00%s\x00%s\x00%s\x00%s\x00%t", owner, req.Model, req.Effort, req.ToolChoice, req.System, tools, req.WebSearch)
+	fmt.Fprintf(h, "%s\x00%s\x00%t\x00%s\x00%s\x00%s\x00%t\x00%s", owner, req.Model, req.Effort != "", req.ToolChoice, req.System, tools, req.WebSearch, req.Schema)
 	hashMessages(h, msgs, nil)
 	return hex.EncodeToString(h.Sum(nil))
 }
@@ -530,6 +582,40 @@ func conversationKeys(owner string, msgs []Message) []string {
 		}
 	})
 	return keys
+}
+
+// historyKey is a conversation's messages, as hashMessages reads them.
+func historyKey(msgs []Message) string {
+	h := sha256.New()
+	hashMessages(h, msgs, nil)
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+// heard keeps the conversation of the request the run now answers.
+func (r *subscriptionRun) heard(msgs []Message) {
+	key := historyKey(msgs)
+	r.mu.Lock()
+	r.told = key
+	r.mu.Unlock()
+}
+
+// follows says msgs go on from the conversation the run last heard: that
+// one whole, then the reply and what came since. A client that rewrote it
+// meanwhile — Pi compacting between a tool call and its result, a rewind —
+// sends another, while the run's agent still holds the one it was told.
+func (r *subscriptionRun) follows(msgs []Message) bool {
+	r.mu.Lock()
+	told := r.told
+	r.mu.Unlock()
+	if told == "" {
+		return true // a run made in a test may have heard none
+	}
+	h := sha256.New()
+	found := false
+	hashMessages(h, msgs, func(int) {
+		found = found || hex.EncodeToString(h.Sum(nil)) == told
+	})
+	return found
 }
 
 // hashMessages writes the messages' words, tool calls and results to h,
@@ -675,8 +761,14 @@ func (r *subscriptionRun) readOutput(rd io.Reader) {
 	// Code, not the client: its block is left out, and the message it ends
 	// goes on in the next one, so the client hears one reply.
 	own := map[int]bool{} // this message's blocks that are such calls
-	theirs := false       // this message calls a client's tool
-	inside := false       // a message goes on after Claude Code's own call
+	// With a schema the answer is what Claude Code's StructuredOutput call
+	// gave once Claude Code took it as fitting: its result's
+	// structured_output. A call that doesn't fit is told so and made again,
+	// and a reply in words is asked for the call, so every message but one
+	// calling a client's tool goes on into the next, as after Claude Code's
+	// own call, and the text the model writes is left out.
+	theirs := false // this message calls a client's tool
+	inside := false // a message goes on after Claude Code's own call
 	// what the messages before cost, as each message's usage counts only
 	// itself and the client keeps the last it is told
 	var before, this Usage
@@ -692,6 +784,10 @@ func (r *subscriptionRun) readOutput(rd io.Reader) {
 			Subtype string `json:"subtype"`
 			IsError bool   `json:"is_error"`
 			Result  string `json:"result"`
+			// the answer fitting the schema, with --json-schema, and what
+			// went wrong in a turn that ended without one
+			StructuredOutput json.RawMessage `json:"structured_output"`
+			Errors           []string        `json:"errors"`
 			// Anthropic's id for the request, on the messages it answered,
 			// and on a failure the HTTP status Claude Code got and its
 			// name for the kind of error (rate_limit, server_error…)
@@ -732,8 +828,11 @@ func (r *subscriptionRun) readOutput(rd io.Reader) {
 			continue
 		}
 		if envelope.Type == "rate_limit_event" {
-			if _, user, ok := strings.Cut(r.owner, "\x00"); ok {
-				provider.NoteClaudeLimits(user, claudeLimits(envelope.RateLimitInfo))
+			// a run in Claude Code's own home is on whatever account
+			// Claude Code is signed in to by now: switched off the
+			// owner's, what it says is another's (nil_1024)
+			if f := strings.Split(r.owner, "\x00"); len(f) > 1 && !(len(f) > 2 && f[2] == ownHome && provider.ClaudeCodeMovedOff(f[1])) {
+				provider.NoteClaudeLimits(f[1], claudeLimits(envelope.RateLimitInfo))
 			}
 			continue
 		}
@@ -741,8 +840,25 @@ func (r *subscriptionRun) readOutput(rd io.Reader) {
 			// a turn that failed — out of quota, rate limited — ends with
 			// this and no message_stop, the CLI waiting on its next input:
 			// the reply ends here, or it would wait with it (#177)
-			if envelope.IsError {
-				r.emit(Event{Kind: KError, Text: envelope.Result, Status: envelope.APIErrorStatus, Code: errKind, RequestID: reqID})
+			waiting := r.schema && inside
+			inside = false
+			switch {
+			case envelope.IsError:
+				text := envelope.Result
+				if text == "" && waiting {
+					text = "Claude Code gave no answer fitting the schema (" + envelope.Subtype + ")"
+					if len(envelope.Errors) > 0 {
+						text += ": " + strings.Join(envelope.Errors, "; ")
+					}
+				}
+				r.emit(Event{Kind: KError, Text: text, Status: envelope.APIErrorStatus, Code: errKind, RequestID: reqID})
+				r.endSegment()
+			case waiting && len(envelope.StructuredOutput) > 0 && string(envelope.StructuredOutput) != "null":
+				r.emit(Event{Kind: KText, Text: string(envelope.StructuredOutput)})
+				r.emit(Event{Kind: KStop, Stop: "stop"})
+				r.endSegment()
+			case waiting:
+				r.emit(Event{Kind: KError, Text: "Claude Code ended the turn with no answer fitting the schema", RequestID: reqID})
 				r.endSegment()
 			}
 			continue
@@ -796,6 +912,10 @@ func (r *subscriptionRun) readOutput(rd io.Reader) {
 		case "content_block_start":
 			switch e.ContentBlock.Type {
 			case "tool_use":
+				if r.schema && e.ContentBlock.Name == "StructuredOutput" {
+					own[e.Index] = true
+					continue
+				}
 				name, ok := strings.CutPrefix(e.ContentBlock.Name, "mcp__magpie__")
 				r.mu.Lock()
 				search := r.search != nil && name == r.searchName
@@ -812,14 +932,16 @@ func (r *subscriptionRun) readOutput(rd io.Reader) {
 				r.mu.Unlock()
 				r.emit(Event{Kind: KToolStart, ID: e.ContentBlock.ID, Name: name})
 			case "text":
-				if e.ContentBlock.Text != "" {
+				if e.ContentBlock.Text != "" && !r.schema {
 					r.emit(Event{Kind: KText, Text: e.ContentBlock.Text})
 				}
 			}
 		case "content_block_delta":
 			switch e.Delta.Type {
 			case "text_delta":
-				r.emit(Event{Kind: KText, Text: e.Delta.Text})
+				if !r.schema {
+					r.emit(Event{Kind: KText, Text: e.Delta.Text})
+				}
 			case "thinking_delta":
 				r.emit(Event{Kind: KThink, Text: e.Delta.Thinking})
 			case "signature_delta":
@@ -831,7 +953,9 @@ func (r *subscriptionRun) readOutput(rd io.Reader) {
 			}
 		case "message_delta":
 			r.emit(Event{Kind: KUsage, Usage: usage(e.Usage), RequestID: reqID})
-			if e.Delta.StopReason == "tool_use" && len(own) > 0 && !theirs {
+			if e.Delta.StopReason != "" && r.schema && !theirs {
+				inside = true // the answer is the result's
+			} else if e.Delta.StopReason == "tool_use" && len(own) > 0 && !theirs {
 				inside = true
 			} else if e.Delta.StopReason != "" {
 				r.emit(Event{Kind: KStop, Stop: stopFromAnthropic(e.Delta.StopReason)})
@@ -1156,12 +1280,17 @@ func (b *subscriptionBridge) mcpCall(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "unknown or expired Claude run", http.StatusNotFound)
 		return
 	}
+	body, status, err := readBoundedRequestBody(w, r, requestLimits{body: 16 << 20}, nil)
+	if err != nil {
+		http.Error(w, err.Error(), status)
+		return
+	}
 	var call struct {
 		ToolCallID string          `json:"tool_call_id"`
 		Name       string          `json:"name"`
 		Arguments  json.RawMessage `json:"arguments"`
 	}
-	if json.NewDecoder(io.LimitReader(r.Body, 16<<20)).Decode(&call) != nil || call.ToolCallID == "" {
+	if json.Unmarshal(body, &call) != nil || call.ToolCallID == "" {
 		http.Error(w, "invalid tool call", http.StatusBadRequest)
 		return
 	}
@@ -1350,10 +1479,23 @@ func (b *subscriptionBridge) removeRun(run *subscriptionRun) {
 	_ = os.RemoveAll(run.tmp)
 }
 
+// ownHome marks a run's owner as Claude Code's own sign-in, run in its
+// own home.
+const ownHome = "own"
+
 func (s *Server) serveClaudeSubscription(w http.ResponseWriter, r *http.Request, from provider.Protocol, p provider.Provider, model string, body []byte, usage *Usage) (int, string) {
 	start := func(ctx context.Context, req *Request) (*subscriptionRun, <-chan Event, error) {
 		ctx = p.Via(ctx) // the account's own proxy, its CLI run's too
 		owner := p.ID + "\x00" + p.Account.User
+		if p.Account.AgentsOwn() {
+			// Claude Code's own sign-in, which a switch moves to another
+			// account: a run kept from before goes on as that one (it
+			// reads its keychain again), so the account, once saved and
+			// run in a config directory of its own, never resumes it
+			// (nil_1024: made first, a saved account's turns went on as
+			// the spent one in its Claude Code)
+			owner += "\x00" + ownHome
+		}
 		if run, events := s.subscription.resume(req, owner); run != nil {
 			return run, events, nil
 		}
@@ -1393,6 +1535,16 @@ func (s *Server) serveSubscription(w http.ResponseWriter, r *http.Request, from 
 	}
 
 	run, results := s.subscription.findRun(req)
+	// the client rewrote the conversation since the run's last reply, as Pi
+	// does compacting it mid-turn: the run's agent holds the one from before,
+	// would answer from it, and tell the client a context as large as ever,
+	// so the client compacts again at each tool call. It is let go, and a
+	// run started anew is told the conversation as the client now has it.
+	if run != nil && !run.follows(req.Messages) {
+		log.Printf("%s run on %s let go: earlier messages changed while it waited for tool results", name, model)
+		run.abort()
+		run = nil
+	}
 	// the client offers a tool the run's agent was never told of, as Claude
 	// Code's ToolSearch loads a deferred one mid-turn: the run is handed it
 	// with the results, as its MCP server's tools changed. A run started
@@ -1433,6 +1585,7 @@ func (s *Server) serveSubscription(w http.ResponseWriter, r *http.Request, from 
 	if err != nil {
 		return writeError(w, from, 502, name+": "+err.Error()), err.Error()
 	}
+	run.heard(req.Messages)
 	// a caller gone before the reply is whole won't carry it on: its agent
 	// is stopped at once, not left to answer no one and wait on tool calls
 	// it never handed over
@@ -1479,7 +1632,7 @@ func relay(w http.ResponseWriter, r *http.Request, from provider.Protocol, name 
 			return writeError(w, from, code, name+": "+msg), msg
 		}
 		sw := newSSEWriter(w)
-		enc := encoder(from, sw, req)
+		enc := encoder(from, sw, req, usage)
 		var failed, said, stop string
 		see := func(ev Event) {
 			switch ev.Kind {
@@ -1523,7 +1676,7 @@ func relay(w http.ResponseWriter, r *http.Request, from provider.Protocol, name 
 		}
 		col.add(ev)
 	}
-	if col.err != "" && len(col.res.Parts) == 0 {
+	if col.err != "" && !saidAnything(col.res.Parts) {
 		abort()
 		// a status, as in a stream, so another account can take over
 		code := 502
@@ -1541,7 +1694,7 @@ func relay(w http.ResponseWriter, r *http.Request, from provider.Protocol, name 
 	usage.add(Usage{Served: res.Model})
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(200)
-	_, _ = w.Write(render(from, res, req))
+	_, _ = w.Write(renderUsage(from, res, req, usage))
 	return 200, col.err
 }
 

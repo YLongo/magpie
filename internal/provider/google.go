@@ -28,6 +28,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -35,6 +36,7 @@ import (
 	"time"
 
 	"github.com/yetone/magpie/internal/catalog"
+	"github.com/yetone/magpie/internal/edit"
 )
 
 // CodeAssist is Google's Code Assist API, which magpie only speaks
@@ -181,28 +183,8 @@ func googleClientOf(idToken string) string {
 
 // envFileValue is one KEY=value of a dotenv file.
 func envFileValue(path, key string) string {
-	f, err := os.Open(path)
-	if err != nil {
-		return ""
-	}
-	defer f.Close()
-	sc := bufio.NewScanner(f)
-	for sc.Scan() {
-		line := strings.TrimSpace(sc.Text())
-		line = strings.TrimPrefix(line, "export ")
-		k, v, ok := strings.Cut(line, "=")
-		if !ok || strings.TrimSpace(k) != key {
-			continue
-		}
-		v = strings.TrimSpace(v)
-		if uq, err := strconv.Unquote(v); err == nil {
-			v = uq
-		} else {
-			v = strings.Trim(v, `'`)
-		}
-		return v
-	}
-	return ""
+	v, _ := edit.GetEnvFile(path, key)
+	return v
 }
 
 // savedGoogleProject is the project the user named for the agent's own
@@ -858,6 +840,7 @@ type googleModelInfo struct {
 	catalog.Model
 	remaining float64 // 0..1, -1 not known
 	resets    time.Time
+	picker    int // its place in Antigravity's model picker, from 1; 0 not there
 }
 
 // modelInfo asks Code Assist which models the account has.
@@ -870,12 +853,21 @@ func (g googleAccount) modelInfo(ctx context.Context) ([]googleModelInfo, error)
 	if g.app.agent == "antigravity" {
 		var res struct {
 			Models map[string]struct {
-				DisplayName string `json:"displayName"`
-				QuotaInfo   *struct {
+				DisplayName     string `json:"displayName"`
+				MaxTokens       int    `json:"maxTokens"`
+				MaxOutputTokens int    `json:"maxOutputTokens"`
+				SupportsImages  *bool  `json:"supportsImages"`
+				QuotaInfo       *struct {
 					RemainingFraction *float64 `json:"remainingFraction"`
 					ResetTime         string   `json:"resetTime"`
 				} `json:"quotaInfo"`
 			} `json:"models"`
+			// the order Antigravity's model picker shows them in
+			AgentModelSorts []struct {
+				Groups []struct {
+					ModelIDs []string `json:"modelIds"`
+				} `json:"groups"`
+			} `json:"agentModelSorts"`
 		}
 		if err := g.call(ctx, g.app.base, "fetchAvailableModels", map[string]any{"project": p.id}, &res, nil); err != nil {
 			return nil, err
@@ -884,7 +876,8 @@ func (g googleAccount) modelInfo(ctx context.Context) ([]googleModelInfo, error)
 			if antigravityHidden[id] || strings.HasPrefix(id, "chat_") || strings.HasPrefix(id, "tab_") {
 				continue
 			}
-			mi := googleModelInfo{Model: catalog.Model{ID: id, Name: m.DisplayName}, remaining: -1}
+			mi := googleModelInfo{Model: catalog.Model{ID: id, Name: m.DisplayName,
+				Context: m.MaxTokens, Output: m.MaxOutputTokens, ImageInput: m.SupportsImages}, remaining: -1}
 			if q := m.QuotaInfo; q != nil {
 				if q.RemainingFraction != nil {
 					mi.remaining = *q.RemainingFraction
@@ -894,6 +887,19 @@ func (g googleAccount) modelInfo(ctx context.Context) ([]googleModelInfo, error)
 				mi.resets, _ = time.Parse(time.RFC3339, q.ResetTime)
 			}
 			out = append(out, mi)
+		}
+		rank := map[string]int{}
+		for _, s := range res.AgentModelSorts {
+			for _, g := range s.Groups {
+				for _, id := range g.ModelIDs {
+					if _, ok := rank[id]; !ok {
+						rank[id] = len(rank) + 1
+					}
+				}
+			}
+		}
+		for i := range out {
+			out[i].picker = rank[out[i].ID]
 		}
 	} else {
 		var res struct {
@@ -931,7 +937,11 @@ func (g googleAccount) modelInfo(ctx context.Context) ([]googleModelInfo, error)
 // them where Code Assist doesn't name them. Gemini CLI's are the ones the
 // CLI offers the account, not its quota's buckets: those name the models
 // it has an allowance of, by Code Assist's ids (gemini-3-flash is the
-// CLI's 3.5 Flash), and the CLI doesn't list by them.
+// CLI's 3.5 Flash), and the CLI doesn't list by them. Antigravity's are
+// the ones it lists, in its picker's order, with the context, output and
+// images it gives each: a model it adds (Claude 5.5, once Google offers it
+// the account) comes with its own, not those of a model of that name
+// elsewhere — Antigravity gives Claude 250k, not Anthropic's 1M.
 func (g googleAccount) models(ctx context.Context) ([]catalog.Model, error) {
 	infos, err := g.modelInfo(ctx)
 	if err != nil {
@@ -954,13 +964,29 @@ func (g googleAccount) models(ctx context.Context) ([]catalog.Model, error) {
 	for _, m := range fallback {
 		names[m.ID] = m.Name
 	}
+	// as Antigravity's picker has them, newest first, then the rest
+	slices.SortStableFunc(infos, func(a, b googleModelInfo) int {
+		switch {
+		case a.picker == b.picker:
+			return 0
+		case a.picker == 0:
+			return 1
+		case b.picker == 0:
+			return -1
+		}
+		return a.picker - b.picker
+	})
 	var out []catalog.Model
 	for _, mi := range infos {
 		m := mi.Model
 		if m.Name == "" {
 			m.Name = names[m.ID]
 		}
-		m.Images = !strings.HasPrefix(m.ID, "gpt-oss")
+		if m.ImageInput != nil {
+			m.Images = *m.ImageInput
+		} else {
+			m.Images = !strings.HasPrefix(m.ID, "gpt-oss")
+		}
 		out = append(out, m)
 	}
 	if len(out) == 0 {
@@ -1008,10 +1034,127 @@ func (g googleAccount) quota(ctx context.Context, plan string) SubscriptionQuota
 		}
 		q.Windows = append(q.Windows, w)
 	}
+	if g.app.agent == "antigravity" {
+		q.Windows = append(q.Windows, g.pools(ctx, q.Windows)...)
+	}
 	if p, err := g.project(ctx); err == nil && q.Plan == "" {
 		q.Plan = p.plan
 	}
 	return q
+}
+
+// pools are an Antigravity account's shared allowances, a 5-hour and a
+// weekly one for each group of models drawing on one quota ("Gemini
+// Models", "Claude and GPT models"), as retrieveUserQuotaSummary reports
+// them; fetchAvailableModels gives each model only the 5-hour figure, the
+// same for every model of a group. Each per-model window in ws is given
+// its group's name as its Pool, so the GUI shows one row a group. None
+// when the summary can't be read: the per-model windows stand alone. They
+// are Aside: routing goes on reading the per-model windows, as before.
+func (g googleAccount) pools(ctx context.Context, ws []QuotaWindow) []QuotaWindow {
+	p, err := g.project(ctx)
+	if err != nil {
+		return nil
+	}
+	var res struct {
+		Groups []struct {
+			DisplayName string `json:"displayName"`
+			Description string `json:"description"`
+			Buckets     []struct {
+				BucketID          string   `json:"bucketId"`
+				Window            string   `json:"window"`
+				RemainingFraction *float64 `json:"remainingFraction"`
+				ResetTime         string   `json:"resetTime"`
+				DisplayName       string   `json:"displayName"`
+				Disabled          bool     `json:"disabled"`
+			} `json:"buckets"`
+		} `json:"groups"`
+	}
+	if err := g.call(ctx, g.app.base, "retrieveUserQuotaSummary", map[string]any{"project": p.id}, &res, nil); err != nil {
+		return nil
+	}
+	var out []QuotaWindow
+	for _, gr := range res.Groups {
+		pool := poolName(gr.DisplayName)
+		if pool == "" {
+			continue
+		}
+		n := 0
+		for _, b := range gr.Buckets {
+			if b.Disabled {
+				continue
+			}
+			w := QuotaWindow{Pool: pool, Used: 100, Aside: true}
+			switch strings.ToLower(b.Window) {
+			case "5h":
+				w.Name, w.Span = "5 hours", 5*time.Hour
+			case "weekly":
+				w.Name, w.Span = "7 days", 7*24*time.Hour
+			default:
+				for _, s := range []string{b.DisplayName, b.Window, b.BucketID} {
+					if w.Name == "" {
+						w.Name = s
+					}
+				}
+			}
+			if w.Name == "" {
+				continue
+			}
+			if b.RemainingFraction != nil {
+				w.Used = (1 - *b.RemainingFraction) * 100
+			} // left out once none is left, as in fetchAvailableModels
+			if t, err := time.Parse(time.RFC3339, b.ResetTime); err == nil {
+				w.ResetsAt = &t
+				w.ResetSecs = int64(max(time.Until(t), 0) / time.Second)
+			}
+			out = append(out, w)
+			n++
+		}
+		if n == 0 {
+			continue
+		}
+		// a model is in the group its name or description names its
+		// family in ("Models within this group: Claude Opus, Claude
+		// Sonnet, GPT-OSS")
+		about := strings.ToLower(gr.DisplayName + " " + gr.Description)
+		for i := range ws {
+			if ws[i].Pool == "" && ws[i].Family != "" && strings.Contains(about, strings.ToLower(ws[i].Family)) {
+				ws[i].Pool = pool
+			}
+		}
+	}
+	return out
+}
+
+// PooledWindows are ws as a page of text shows them: a pool's own windows,
+// named with their pool ("Gemini · 7 days"), in place of the per-model
+// windows drawing on it; ws as it is when it has no pool.
+func PooledWindows(ws []QuotaWindow) []QuotaWindow {
+	if !slices.ContainsFunc(ws, func(w QuotaWindow) bool { return w.Pool != "" && w.Model == "" }) {
+		return ws
+	}
+	var out []QuotaWindow
+	for _, w := range ws {
+		switch {
+		case w.Pool == "":
+			out = append(out, w)
+		case w.Model == "":
+			w.Name = w.Pool + " · " + w.Name
+			out = append(out, w)
+		}
+	}
+	return out
+}
+
+// poolName is a quota group's name without "models" at its end, its "and"
+// an ampersand: "Gemini Models" is Gemini, "Claude and GPT models" Claude
+// & GPT.
+func poolName(s string) string {
+	s = strings.TrimSpace(s)
+	if l := strings.ToLower(s); strings.HasSuffix(l, " models") {
+		s = strings.TrimSpace(s[:len(s)-len(" models")])
+	}
+	return strings.ReplaceAll(s, " and ", " & ")
 }
 
 // antigravityVendor is the family a model of Antigravity's is in — Gemini,

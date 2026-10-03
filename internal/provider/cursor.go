@@ -1,5 +1,14 @@
 package provider
 
+// PLUGIN-SERVED (see AGENTS.md): Cursor ("cursor") is a deprecated built-in
+// subscription served by its plugin, @magpie-community/opencode-cursor-auth,
+// once moved onto it (provider.Moved; the default for a new sign-in). A
+// moved one's sign-ins, models, requests and usage are all the plugin's,
+// never this code's (only the move, in migrate*.go, still reads its
+// accounts). A fix here alone doesn't reach those users; fix the plugin
+// (github.com/magpie-community/plugins, packages/cursor) and raise the
+// mover's min in internal/provider/migrate_side.go.
+
 // A Cursor subscription is served through the API cursor-agent talks to
 // (gateway/cursor.go), with the account it is signed in to; here is who that
 // account is, the models it offers, the sign-in, which is cursor-agent's own
@@ -72,7 +81,7 @@ func askCursorStatus() (user, plan string, ok bool, err error) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	out, err := agentCommand(ctx, path, "about", "--format", "json").Output()
+	out, err := agentProbe(ctx, path, "about", "--format", "json").Output()
 	user, plan, said := parseCursorAbout(out)
 	switch {
 	case user != "":
@@ -119,6 +128,10 @@ func cursorAccount() (Provider, bool) {
 		if err != nil {
 			return nil, err
 		}
+		// and the picker's models `cursor-agent models` leaves out
+		if tok, err := cursorToken(); err == nil {
+			ms = append(ms, cursorPickerModels(ctx, tok, ms)...)
+		}
 		return ms, catalog.SaveLive("cursor", "", ms)
 	}
 	return Provider{ID: "cursor", Name: "Cursor", Icon: "cursor", Website: "https://cursor.com", Account: acct}, true
@@ -138,7 +151,7 @@ func cursorModels(ctx context.Context) ([]catalog.Model, error) {
 	}
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
-	out, err := agentCommand(ctx, path, "models").Output()
+	out, err := agentProbe(ctx, path, "models").Output()
 	if err != nil {
 		return nil, errorf("cursor-agent models: %v", err)
 	}
@@ -237,8 +250,14 @@ func cursorLinkWhole(link string) bool {
 		return false
 	}
 	q := u.Query()
-	return q.Get("challenge") != "" && q.Get("uuid") != ""
+	// The CLI may wrap after the UUID, with the remaining login parameters
+	// arriving in another pipe write. Credentials alone do not finish its URL.
+	return q.Get("challenge") != "" && cursorLoginUUID.MatchString(q.Get("uuid")) &&
+		q.Get("mode") == "login" && q.Get("redirectTarget") == "cli" &&
+		(q.Get("supportsSelectedTeamLogin") == "true" || q.Get("supportsSelectedTeamLogin") == "false")
 }
+
+var cursorLoginUUID = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
 
 // cursorVersionFallback is the CLI version said when no install names one.
 const cursorVersionFallback = "2026.09.23-86fc751"
@@ -351,7 +370,7 @@ func CursorToken() (string, error) {
 			tok = t // renewed while this waited
 		} else {
 			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-			_ = agentCommand(ctx, path, "status").Run()
+			_ = agentProbe(ctx, path, "status").Run()
 			cancel()
 			tok = readCursorToken()
 		}

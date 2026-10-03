@@ -683,7 +683,7 @@ func quotaLines(qs []provider.SubscriptionQuota, asked, left bool, width int, no
 		// the windows follow the name, those that don't fit on lines below
 		// it, and a Codex account's resets after them
 		var cells []string
-		for _, w := range q.Windows {
+		for _, w := range provider.PooledWindows(q.Windows) {
 			cells = append(cells, quotaCell(w, left, now))
 		}
 		if r := q.Resets; r != nil {
@@ -714,6 +714,9 @@ func quotaLines(qs []provider.SubscriptionQuota, asked, left bool, width int, no
 // quotaCell is one window: its name, a meter, how much is used or left,
 // and when it starts again: on the clock, and how long until then.
 func quotaCell(w provider.QuotaWindow, left bool, now time.Time) string {
+	if w.Unlimited {
+		return sMuted.Render(w.Name) + " " + sText.Render("Unlimited")
+	}
 	used := int(math.Round(math.Max(0, math.Min(100, w.Used))))
 	n, word := used, "used"
 	if left {
@@ -729,8 +732,8 @@ func quotaCell(w provider.QuotaWindow, left bool, now time.Time) string {
 		fill = sBad
 	}
 	pct := fmt.Sprintf("%d%% %s", n, word)
-	if w.Display != "" {
-		pct = w.Display + " · " + pct
+	if c := w.Count(left); c != "" {
+		pct = c + " · " + pct
 	}
 	c := sMuted.Render(w.Name) + " " + fill.Render(strings.Repeat("█", on)) + sFaint.Render(strings.Repeat("░", cells-on)) + " " + sText.Render(pct)
 	var at time.Time

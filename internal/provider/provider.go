@@ -18,6 +18,7 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/yetone/magpie/internal/appdir"
 	"github.com/yetone/magpie/internal/catalog"
 	"github.com/yetone/magpie/internal/settings"
 	"github.com/yetone/magpie/internal/steady"
@@ -30,7 +31,7 @@ const (
 	Chat      Protocol = "chat"      // OpenAI Chat Completions
 	Responses Protocol = "responses" // OpenAI Responses
 	Anthropic Protocol = "anthropic" // Anthropic Messages
-	Gemini    Protocol = "gemini"    // Google Gemini; only served to clients, never spoken upstream
+	Gemini    Protocol = "gemini"    // Google Gemini. Served to clients; spoken upstream only for Factory's generate route
 )
 
 // Protocols in the order magpie prefers them when it has to translate.
@@ -63,8 +64,8 @@ type Provider struct {
 	Responses string `json:"responses,omitempty"`
 	Anthropic string `json:"anthropic,omitempty"`
 	// Decide is the base of a decision API (TypeSafe's System One, which
-	// Jev answers): a provider with it serves no conversation, only the
-	// routing groups' choices of model and effort (see decide.go).
+	// Jev answers), for routing groups' choices of model and effort. The
+	// provider may also serve conversations on the other endpoints.
 	Decide string `json:"decide,omitempty"`
 
 	// Fallback is where a request goes when this provider can't take it —
@@ -76,7 +77,9 @@ type Provider struct {
 	// Routing is how requests spread over the keys or accounts it has on:
 	// "" smart, the first while it has quota to spare, then whichever has
 	// the most; "order" in order, the next one only when the one before
-	// can't take it; "rotate" each in turn; "usage" the least used first.
+	// can't take it; "rotate" each in turn; "usage" the least used first;
+	// "pace" the one with the most of its week left per hour until it
+	// renews first, so less of a week is lost at its reset.
 	// Whichever it is, one out of credit, out of quota, rate limited or
 	// failing is passed over for as long as that lasts.
 	Routing string `json:"routing,omitempty"`
@@ -86,6 +89,24 @@ type Provider struct {
 	// again rather than lost (see Affinities): "" auto, "session",
 	// "turn", "off".
 	Affinity string `json:"affinity,omitempty"`
+
+	// KeepLogin, on Codex's or Claude Code's subscription, keeps the agent
+	// signed in to the account the user made first: magpie doesn't sign it
+	// in to another when that one runs low or out (#524). The gateway still
+	// spreads its requests over the accounts that are on, as Routing says.
+	KeepLogin bool `json:"keepLogin,omitempty"`
+	// KeepLoginAs, with KeepLogin, is the account the agent is kept signed
+	// in to whichever is first in the order the gateway tries them: the one
+	// the user uses the agent as, while the first is only the one whose
+	// allowance is spent first (#524). Empty, it is the first.
+	KeepLoginAs string `json:"keepLoginAs,omitempty"`
+
+	// MaxConcurrency is how many requests may be out at the vendor at once
+	// on each of its keys or accounts (Discord, Lemon: a Codex account is
+	// risk-controlled past five or six at once); the rest wait their turn,
+	// in the order they came (see Concurrency). nil follows what a
+	// plugin's provider says it takes, else none; 0 is no limit.
+	MaxConcurrency *int `json:"maxConcurrency,omitempty"`
 
 	// Headers are extra HTTP request headers sent to the vendor, exactly as
 	// the user typed them. They ride on every request magpie makes to a plain
@@ -113,6 +134,11 @@ type Provider struct {
 	// of its own, by its name in lower case, as Proxy takes one; an
 	// account not in it follows Proxy (see ProxyChoice).
 	AccountProxies map[string]string `json:"accountProxies,omitempty"`
+	// AccountModels is, for a provider holding several accounts or keys,
+	// the models each one the user narrowed serves, and no others (#474):
+	// an account by its name in lower case, a key by its KeyID. One not in
+	// it serves every model the provider does (see account_models.go).
+	AccountModels map[string][]string `json:"accountModels,omitempty"`
 
 	// BalanceURL, when set, is where the vendor tells what is left on a
 	// key, asked with the key the way a chat request carries it; BalancePath
@@ -172,6 +198,10 @@ type Provider struct {
 	// Quiet is set on a removed account whose "Add it back" line the user
 	// dismissed: it is offered again only from the Add sheet (#116).
 	Quiet bool `json:"quiet,omitempty"`
+	// Tucked is set on a quiet one the user hid from the Add sheet too:
+	// it is listed there only behind "Show N hidden", or when searched
+	// for by name (#116).
+	Tucked bool `json:"tucked,omitempty"`
 
 	// Account is set when the provider is an agent the user signed in to
 	// (see account.go); it is derived, never stored.
@@ -184,16 +214,17 @@ type file struct {
 	// Searches are the web search APIs a model's search goes to when no
 	// provider can search (see search_api.go).
 	Searches []SearchAPI `json:"searches,omitempty"`
+	// NoAutoGroups: the user turned off the groups magpie finds on its
+	// own (SetAutoGroups); the groups they made or changed stay.
+	NoAutoGroups bool `json:"noAutoGroups,omitempty"`
+	// Order is the order the user put the providers in on the Providers
+	// tab (#499), by id; one not in it follows those that are, in the
+	// order it was added (see SetOrder).
+	Order []string `json:"order,omitempty"`
 }
 
 // Path is the file the user's providers live in.
-func Path() string {
-	if x := os.Getenv("XDG_CONFIG_HOME"); x != "" {
-		return filepath.Join(x, "magpie", "providers.json")
-	}
-	home, _ := os.UserHomeDir()
-	return filepath.Join(home, ".config", "magpie", "providers.json")
-}
+func Path() string { return filepath.Join(appdir.Config(), "providers.json") }
 
 // load is the file for a read that goes on without it: start-up, the
 // gateway, the catalog. One that can't be read is taken as empty there;
@@ -268,7 +299,8 @@ func store(f file) error {
 // the signed-in agents. An entry in the file with no URL is only the
 // model picks for one of those accounts.
 func All() []Provider {
-	stored := load().Providers
+	f := load()
+	stored := f.Providers
 	picks := map[string]Provider{}
 	var out []Provider
 	for _, p := range stored {
@@ -284,8 +316,9 @@ func All() []Provider {
 			continue
 		}
 		pk := picks[a.ID]
-		a.Models, a.Unlisted, a.Off, a.Fallback, a.Routing, a.Affinity, a.Contexts, a.Family = pk.Models, pk.Unlisted, pk.Off, pk.Fallback, pk.Routing, pk.Affinity, pk.Contexts, pk.Family
-		a.Proxy, a.AccountProxies = pk.Proxy, pk.AccountProxies
+		a.Models, a.Unlisted, a.Off, a.Fallback, a.Routing, a.Affinity, a.KeepLogin, a.KeepLoginAs, a.Contexts, a.Family = pk.Models, pk.Unlisted, pk.Off, pk.Fallback, pk.Routing, pk.Affinity, pk.KeepLogin, pk.KeepLoginAs, pk.Contexts, pk.Family
+		a.Proxy, a.AccountProxies, a.AccountModels = pk.Proxy, pk.AccountProxies, pk.AccountModels
+		a.MaxConcurrency = pk.MaxConcurrency
 		if a.ID == "cursor" { // picked before its efforts were one model
 			a.Models = cursorPicks(a.Models)
 		}
@@ -294,7 +327,7 @@ func All() []Provider {
 		}
 		out = append(out, a)
 	}
-	return out
+	return ordered(out, f.Order)
 }
 
 // Hidden lists the signed-in accounts the user removed from magpie.
@@ -303,7 +336,7 @@ func Hidden() []Provider {
 	for _, a := range Accounts() {
 		for _, p := range load().Providers {
 			if p.ID == a.ID && p.Hidden {
-				a.Quiet = p.Quiet
+				a.Quiet, a.Tucked = p.Quiet, p.Tucked
 				out = append(out, a)
 			}
 		}
@@ -322,8 +355,11 @@ func find(ps []Provider, id string) (Provider, bool) {
 
 // Find looks a provider up by id (or name, case-insensitively).
 func Find(id string) (*Provider, error) {
+	return findIn(All(), id)
+}
+
+func findIn(all []Provider, id string) (*Provider, error) {
 	q := strings.ToLower(strings.TrimSpace(id))
-	all := All()
 	// an id before a name: a provider of the user's called WorkBuddy isn't
 	// the workbuddy subscription
 	if i := slices.IndexFunc(all, func(p Provider) bool { return p.ID == q }); i >= 0 {
@@ -384,7 +420,7 @@ func Save(p Provider) error {
 		if p.ID == "kiro" {
 			key = p.Key
 		}
-		p = Provider{ID: p.ID, Key: key, Models: p.Models, Unlisted: p.Unlisted, Off: p.Off, Fallback: p.Fallback, Routing: p.Routing, Affinity: p.Affinity, Contexts: p.Contexts, Family: p.Family, Proxy: p.Proxy, AccountProxies: p.AccountProxies, Hidden: hiddenAccount(p.ID), Quiet: quietAccount(p.ID)}
+		p = Provider{ID: p.ID, Key: key, Models: p.Models, Unlisted: p.Unlisted, Off: p.Off, Fallback: p.Fallback, Routing: p.Routing, Affinity: p.Affinity, KeepLogin: p.KeepLogin, KeepLoginAs: p.KeepLoginAs, Contexts: p.Contexts, Family: p.Family, Proxy: p.Proxy, AccountProxies: p.AccountProxies, AccountModels: p.AccountModels, MaxConcurrency: p.MaxConcurrency, Hidden: hiddenAccount(p.ID), Quiet: quietAccount(p.ID), Tucked: tuckedAccount(p.ID)}
 	} else {
 		p.AccountProxies = nil // a provider of a key has no accounts to proxy apart
 		if subscriptionID(p.ID) && !stored(p.ID) {
@@ -396,6 +432,9 @@ func Save(p Provider) error {
 				return errors.New("Azure OpenAI needs your resource's endpoint, e.g. https://<resource>.openai.azure.com")
 			}
 			return errors.New("a provider needs a base URL")
+		}
+		if strings.Contains(p.Decide, WorkspaceID) {
+			return errors.New("Bailian's decision model is asked at your workspace's host: give its workspace ID (workspace=… or the editor's Workspace ID), or pick the Token Plan")
 		}
 		if p.Key == "" && !keyOptional(p) {
 			return fmt.Errorf("%s needs an API key", p.Name)
@@ -562,6 +601,35 @@ func quietAccount(id string) bool {
 	return false
 }
 
+func tuckedAccount(id string) bool {
+	for _, p := range load().Providers {
+		if p.ID == id {
+			return p.Tucked
+		}
+	}
+	return false
+}
+
+// TuckAccount hides a removed account from the Add sheet's "Removed from
+// magpie" too (on), or lists it there again (off). Tucked, it is quiet as
+// well: no reminder line either (#116).
+func TuckAccount(id string, on bool) error {
+	f, err := read()
+	if err != nil {
+		return err
+	}
+	for i := range f.Providers {
+		if f.Providers[i].ID == id && f.Providers[i].Hidden {
+			f.Providers[i].Tucked = on
+			if on {
+				f.Providers[i].Quiet = true
+			}
+			return store(f)
+		}
+	}
+	return nil
+}
+
 // QuietAccount stops reminding the user of an account they removed: its
 // "Add it back" line goes, and it is offered only from the Add sheet.
 func QuietAccount(id string) error {
@@ -587,7 +655,7 @@ func ShowAccount(id string) error {
 	}
 	for i := range f.Providers {
 		if f.Providers[i].ID == id && f.Providers[i].Hidden {
-			f.Providers[i].Hidden, f.Providers[i].Quiet = false, false
+			f.Providers[i].Hidden, f.Providers[i].Quiet, f.Providers[i].Tucked = false, false, false
 			return store(f)
 		}
 	}
@@ -643,6 +711,7 @@ func normalize(p Provider) Provider {
 	p.Key = strings.TrimSpace(p.Key)
 	p.Proxy = strings.TrimSpace(p.Proxy)
 	p.AccountProxies = normalAccountProxies(p.AccountProxies)
+	p.AccountModels = normalAccountModels(p.AccountModels)
 	p.ZhipuTeam = p.ZhipuTeam.normal()
 	p.remoteMagpieEndpoints()
 	for _, u := range []*string{&p.Chat, &p.Responses, &p.Anthropic, &p.Decide, &p.Website, &p.KeysURL} {
@@ -669,11 +738,27 @@ func normalize(p Provider) Provider {
 	if p.Preset == "qianfan-token-plan" {
 		p.Preset = "baidu-qianfan"
 	}
-	if p.Routing != Ordered && p.Routing != Rotate && p.Routing != LeastUsed {
+	// OpenCode Zen serves its free models (-free) signed out, to the key
+	// OpenCode itself sends then: a Zen provider saved with no key of its
+	// own asks with that one
+	if p.Preset == "opencode-zen" && p.Key == "" {
+		p.Key = OpenCodeAnonymousKey
+	}
+	// a Zen provider saved before its preset had System One for Jev
+	// (01huadalang: its Jev was asked as a chat model, and failed)
+	if p.Preset == "opencode-zen" && p.Decide == "" && p.Chat != "" {
+		if pr := Preset(p.Preset); pr != nil {
+			p.Decide = pr.Decide
+		}
+	}
+	if p.Routing != Ordered && p.Routing != Rotate && p.Routing != LeastUsed && p.Routing != Pace {
 		p.Routing = ""
 	}
 	if !slices.Contains(Affinities, p.Affinity) {
 		p.Affinity = ""
+	}
+	if p.MaxConcurrency != nil && *p.MaxConcurrency < 0 {
+		p.MaxConcurrency = new(int)
 	}
 	p.Catalog = strings.Join(p.Catalogs(), ", ")
 	// a Bedrock provider saved before the preset had its Responses API
@@ -767,6 +852,12 @@ func (p Provider) Base(proto Protocol) string {
 		if p.Account != nil {
 			return p.Account.codeAssist
 		}
+	case Gemini:
+		// Factory's Gemini models are generateContent at /api/llm/g, not
+		// Code Assist. No other provider speaks Gemini upstream.
+		if p.ID == "factory" && p.Account != nil {
+			return factoryAPI + "/api/llm/g/v1"
+		}
 	}
 	return ""
 }
@@ -787,10 +878,15 @@ func (p Provider) Speaks() []Protocol {
 	if p.IsPlugin() && p.Account.codeAssist != "" {
 		out = append(out, CodeAssist)
 	}
+	// Factory's Gemini models, on generateContent. A model droid didn't
+	// list stays on the other three (factoryAPIs); this is not one of them.
+	if p.ID == "factory" && p.Account != nil {
+		out = append(out, Gemini)
+	}
 	return out
 }
 
-// ResponsesFirst: an OpenAI model on OpenAI's API, Copilot's or Bedrock's,
+// ResponsesFirst: an OpenAI model on OpenAI's API, Copilot's, PipeLLM's or Bedrock's,
 // which is best asked on the Responses API though Chat serves it too.
 func (p Provider) ResponsesFirst(model string) bool {
 	if p.Responses != "" && p.IsBedrock() {
@@ -798,9 +894,15 @@ func (p Provider) ResponsesFirst(model string) bool {
 	}
 	// Azure OpenAI's deployments are named as the user likes; one named
 	// for its model (gpt-5-codex, o4-mini) is taken for it
-	if p.Responses == "" || (p.ID != "copilot" && HostOf(p.Responses) != "api.openai.com" && !p.IsAzure()) {
+	if p.Responses == "" || (p.ID != "copilot" && HostOf(p.Responses) != "api.openai.com" && HostOf(p.Responses) != "api.pipellm.ai" && !p.IsAzure()) {
 		return false
 	}
+	return openAIModel(model)
+}
+
+// openAIModel is whether model is one of OpenAI's own by its name: a GPT,
+// a Codex or an o-series model, after any vendor prefix.
+func openAIModel(model string) bool {
 	m := strings.ToLower(model[strings.LastIndex(model, "/")+1:])
 	return strings.HasPrefix(m, "gpt-") || strings.HasPrefix(m, "codex") ||
 		len(m) > 1 && m[0] == 'o' && m[1] >= '0' && m[1] <= '9'

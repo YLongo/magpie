@@ -83,7 +83,8 @@ type Account struct {
 	// reach, factory.go; another model for Copilot's Auto, copilot_refused.go).
 	retry func(ctx context.Context, model string, status int, body []byte) bool
 	// unusable is set on a Copilot account: whether a model its list offers
-	// is one the account was refused (copilot_refused.go).
+	// is one the account was refused (copilot_refused.go); and on a ZCode
+	// account on the Start Plan: whether it is one only the Coding Plan has.
 	unusable func(model string) bool
 	// explain adds what the user can do about a refusal the account's
 	// backend answered, "" when there is nothing to add (factory.go).
@@ -98,13 +99,27 @@ type Account struct {
 	wasHost   string
 	moved     bool
 	transport func(req *http.Request) (*http.Response, error)
+	// clientFor is the client a request of the account's goes through in
+	// place of the one it was given, nil for that one (zcode_start.go).
+	clientFor func(req *http.Request) *http.Client
 }
 
 // APIs lists the APIs model is served on, as the provider's last model
 // list said: Copilot serves its GPT models on Responses alone and its
 // Claude models on Chat and Anthropic's. nil is not known, and every API
-// the provider speaks may be tried.
+// the provider speaks may be tried. One the user set for the model
+// (SetModelAPI) is the only one.
 func (p Provider) APIs(model string) []Protocol {
+	// the one the user said it is asked on, whatever the list says
+	if proto, ok := p.ModelAPI(model); ok {
+		return []Protocol{proto}
+	}
+	return p.ListedAPIs(model)
+}
+
+// ListedAPIs are the APIs model is served on as its vendor says, whatever
+// the user set: what APIs gives with nothing set (the editor's Auto).
+func (p Provider) ListedAPIs(model string) []Protocol {
 	if p.IsPlugin() {
 		return p.pluginAPIs(model)
 	}
@@ -216,7 +231,10 @@ func (p Provider) Prepare(body []byte) []byte {
 type Exclusion struct {
 	Agent    string `json:"agent"`
 	Provider string `json:"provider,omitempty"` // set when the user removed it; saving it brings it back
-	Why      string `json:"why"`
+	// Name is the removed provider's, for a sign-in no agent names: a
+	// plugin's, whose Agent is "plugin" (#694)
+	Name string `json:"name,omitempty"`
+	Why  string `json:"why"`
 	// SignedOut: the agent has accounts saved in magpie but isn't signed
 	// in where magpie looks, and so none of them is offered.
 	SignedOut bool `json:"signedOut,omitempty"`
@@ -226,6 +244,9 @@ type Exclusion struct {
 	// Quiet: the user asked not to be reminded of it; only the Add sheet
 	// offers it back.
 	Quiet bool `json:"quiet,omitempty"`
+	// Tucked: hidden from the Add sheet too, but for its "Show N hidden"
+	// and a search by name (#116).
+	Tucked bool `json:"tucked,omitempty"`
 }
 
 // Excluded lists sign-ins magpie detects but leaves out: the accounts the
@@ -234,7 +255,11 @@ type Exclusion struct {
 func Excluded() []Exclusion {
 	var out []Exclusion
 	for _, a := range Hidden() {
-		out = append(out, Exclusion{Agent: a.Account.Agent, Provider: a.ID, Why: "You removed it from magpie.", Quiet: a.Quiet})
+		x := Exclusion{Agent: a.Account.Agent, Provider: a.ID, Why: "You removed it from magpie.", Quiet: a.Quiet, Tucked: a.Tucked}
+		if a.IsPlugin() {
+			x.Name = a.Name
+		}
+		out = append(out, x)
 	}
 	return append(out, savedButSignedOut()...)
 }
@@ -536,7 +561,7 @@ func askClaudeStatus() (user, plan string, signedOut, ok bool) {
 	// settings.json it applies itself (auth status takes no
 	// --setting-sources), and then answers with no email; claudeSignedInUser
 	// names the account from ~/.claude.json instead (#177).
-	cmd := proc.CommandContext(ctx, path, "auth", "status", "--json")
+	cmd := proc.ProbeContext(ctx, path, "auth", "status", "--json")
 	cmd.Env = withoutClaudeWiring(os.Environ())
 	out, _ := cmd.Output()
 	var status struct {
@@ -592,6 +617,10 @@ func claudeAccount() (Provider, bool) {
 	}
 	return claudeProvider(&Account{Agent: "claude", User: user, Plan: plan}), true
 }
+
+// StandIn says the account is a saved one served in the place of the
+// agent's own sign-in, which is signed out.
+func (a *Account) StandIn() bool { return a != nil && a.standIn }
 
 // claudeProvider is the Claude Code provider of acct.
 func claudeProvider(acct *Account) Provider {
@@ -806,6 +835,7 @@ func codexAccount(home string) (Provider, bool) {
 		}
 		catalog.SaveLive(accountModels("codex", acct.User), CodexBase, ms)
 		codexFetchSaved(ctx)
+		ms = codexPoolLevels(ms)
 		return ms, catalog.SaveLive("codex", CodexBase, ms)
 	}
 	return Provider{ID: "codex", Name: "Codex", Icon: "codex-color", Responses: CodexBase, Website: "https://chatgpt.com/codex", Account: acct}, true

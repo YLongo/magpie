@@ -101,7 +101,7 @@ export const FakePlugin = async ({ client }) => ({
         resets: full ? { count: 3, byWindow: true, fiveHour: 2, weekly: 1 } : undefined,
         windows: [
           { name: "5 hours", used: full ? 100 : 25, resetsAt: Date.now() + 3600e3, span: 5 * 3600, models: ["fake-claude"] },
-          { name: "Week", used: 10, resetsAt: Math.floor(Date.now() / 1000) + 86400, span: 7 * 86400 },
+          { name: "Week", used: 10, resetsAt: Math.floor(Date.now() / 1000) + 86400, span: 7 * 86400, amount: 120, limit: 1200, unit: "credits" },
           { name: "Extra", used: 250, display: "$2.50", aside: true },
         ],
       }
@@ -123,6 +123,10 @@ export const FakePlugin = async ({ client }) => ({
       }
       // fake-1 costs the plan nothing, as a WorkBuddy model of x0.00 credits
       p.models["fake-1"].free = true
+      // fake-claude's credits are a number, discounted; fake-gemini's as
+      // WorkBuddy's picker writes them
+      if (p.models["fake-claude"]) Object.assign(p.models["fake-claude"], { rate: 0.5, rateWas: 1 })
+      if (p.models["fake-gemini"]) p.models["fake-gemini"].rate = "x0.03"
       if (auth?.key === "few") return { "fake-1": p.models["fake-1"] }
       // $FAKE_MODELS: the vendor's list, whose answer names one more model
       if (process.env.FAKE_MODELS && auth) {

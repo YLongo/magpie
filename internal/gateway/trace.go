@@ -143,31 +143,45 @@ func groupRef(g provider.Group, ms []provider.Member) *GroupRef {
 
 // Weighed is one account or key as routing weighed it.
 type Weighed struct {
-	ID       string            `json:"id"` // what rests after a failure
-	Provider string            `json:"provider"`
-	Name     string            `json:"name"` // the provider's
-	Icon     string            `json:"icon,omitempty"`
-	Preset   string            `json:"preset,omitempty"`
-	Who      string            `json:"who,omitempty"` // the account, or the key's name or its masked self
-	Kind     string            `json:"kind"`          // "account", "key", or "provider" when it has one
-	Agent    string            `json:"agent,omitempty"`
-	Plan     string            `json:"plan,omitempty"`
-	Model    string            `json:"model"`
-	Fixed    string            `json:"fixed,omitempty"` // the effort the group's member it is of is fixed at
-	Fast     bool              `json:"fast,omitempty"`  // the group's member it is of is sent fast
-	Routing  string            `json:"routing"`         // its provider's: "", order, rotate, usage
-	Fallback bool              `json:"fallback,omitempty"`
-	Shared   bool              `json:"shared,omitempty"` // its provider has more than one on
-	Known    bool              `json:"known,omitempty"`  // the vendor said what the account has left
-	Learns   bool              `json:"learns,omitempty"` // not known, but its answer will tell
-	Used     float64           `json:"used"`             // share of the allowance counting the model, used
+	ID       string  `json:"id"` // what rests after a failure
+	Provider string  `json:"provider"`
+	Name     string  `json:"name"` // the provider's
+	Icon     string  `json:"icon,omitempty"`
+	Preset   string  `json:"preset,omitempty"`
+	Who      string  `json:"who,omitempty"` // the account, or the key's name or its masked self
+	Kind     string  `json:"kind"`          // "account", "key", or "provider" when it has one
+	Agent    string  `json:"agent,omitempty"`
+	Plan     string  `json:"plan,omitempty"`
+	Model    string  `json:"model"`
+	Fixed    string  `json:"fixed,omitempty"` // the effort the group's member it is of is fixed at
+	Fast     bool    `json:"fast,omitempty"`  // the group's member it is of is sent fast
+	Routing  string  `json:"routing"`         // its provider's: "", order, rotate, usage
+	Fallback bool    `json:"fallback,omitempty"`
+	Shared   bool    `json:"shared,omitempty"` // its provider has more than one on
+	Known    bool    `json:"known,omitempty"`  // the vendor said what the account has left
+	Learns   bool    `json:"learns,omitempty"` // not known, but its answer will tell
+	Used     float64 `json:"used"`             // share of the allowance counting the model, used
+	// Amount of Limit in Unit: the count that share is of, when the
+	// vendor counts it so (WorkBuddy's credits, #659)
+	Amount   float64           `json:"amount,omitempty"`
+	Limit    float64           `json:"limit,omitempty"`
+	Unit     string            `json:"unit,omitempty"`
 	Renews   []time.Time       `json:"renews,omitempty"` // when those windows renew, the biggest first
+	Pace     float64           `json:"pace,omitempty"`   // weekly pace: share of its week left per hour until it renews
+	Due      *time.Time        `json:"due,omitempty"`    // weekly pace: when the window that pace went by renews
 	Tokens   float64           `json:"tokens,omitempty"` // least used: tokens it served lately
 	Turn     bool              `json:"turn,omitempty"`   // in turn: it was this one's turn
 	Fit      int               `json:"fit,omitempty"`    // keyFit
 	Speaks   provider.Protocol `json:"speaks,omitempty"` // a key made for one protocol only
 	Rest     *Rest             `json:"rest,omitempty"`   // resting after a failure, when the request came
 	Unlisted bool              `json:"unlisted,omitempty"`
+	// Barred: left out as the user set it not to serve the model, its
+	// own list of models leaving it out (#474)
+	Barred bool `json:"barred,omitempty"`
+	// Rank: its place in its provider's own list of accounts or keys, the
+	// order the provider's page shows and a drag sets (#217); routing may
+	// weigh them in another
+	Rank int `json:"rank,omitempty"`
 	// Aside: a key made for another protocol than the keys routed over,
 	// tried only after them
 	Aside bool `json:"aside,omitempty"`
@@ -205,6 +219,9 @@ type Try struct {
 	Error   string `json:"error,omitempty"`
 	Rest    *Rest  `json:"rest,omitempty"`  // how long it now sits out; none when it was the last to try
 	Again   int64  `json:"again,omitempty"` // ms waited before it was tried again, the last one left
+	// Queued: ms it waited for one of its key's or account's slots, the
+	// provider's MaxConcurrency out already (concurrency.go)
+	Queued int64 `json:"queued,omitempty"`
 	// Reset: its week used up and nobody else left, one of the account's
 	// Codex resets was spent by itself (the user's setting) — on Who, and
 	// what spending it did — and the request asked again
@@ -224,7 +241,7 @@ type planned struct {
 
 func weighed(c candidate, p provider.Provider, wg weighing, fallback bool, from provider.Protocol) Weighed {
 	w := Weighed{ID: c.rest, Provider: p.ID, Name: p.Name, Icon: p.Icon, Preset: p.Preset, Model: c.model, Fixed: c.effort, Fast: c.fast,
-		Routing: p.Routing, Fallback: fallback, Shared: c.rest != p.ID}
+		Routing: p.Routing, Fallback: fallback, Shared: c.rest != p.ID, Rank: c.rank}
 	switch {
 	case c.p.Account != nil:
 		w.Kind, w.Who, w.Agent, w.Plan = "account", c.p.Account.User, c.p.Account.Agent, c.p.Account.Plan
@@ -243,7 +260,14 @@ func weighed(c candidate, p provider.Provider, wg weighing, fallback bool, from 
 		w.Kind = "provider"
 	}
 	if l, ok := wg.lefts[c.allowanceKey()]; ok {
-		w.Known, w.Used, w.Renews = true, l.used, l.renews
+		w.Known, w.Used, w.Renews, w.Pace = true, l.used, l.renews, l.pace
+		if l.of > 0 {
+			w.Amount, w.Limit, w.Unit = l.amount, l.of, l.unit
+		}
+		if !l.due.IsZero() {
+			due := l.due
+			w.Due = &due
+		}
 	} else if wg.lefts != nil {
 		w.Learns = learns(c, wg.lefts)
 	}
@@ -339,7 +363,7 @@ func (t *trace) update(r *Route, f func(r *Route)) {
 				t.totals.Rerouted++
 			}
 		}
-		if r.Status >= 400 {
+		if r.Status >= 400 || r.Error != "" {
 			t.totals.Errors++
 		}
 		if keepRoutes {

@@ -1,5 +1,15 @@
 package provider
 
+// PLUGIN-SERVED (see AGENTS.md): WorkBuddy ("workbuddy" and "workbuddy-ai")
+// is a deprecated built-in subscription served by its plugin,
+// @magpie-community/opencode-workbuddy-auth, once moved onto it
+// (provider.Moved; the default for a new sign-in). A moved one's sign-ins,
+// models, requests and usage are all the plugin's, never this code's (only
+// the move, in migrate*.go, still reads its accounts). A fix here alone
+// doesn't reach those users; fix the plugin
+// (github.com/magpie-community/plugins, packages/workbuddy) and raise the
+// mover's min in internal/provider/migrate_workbuddy.go.
+
 // WorkBuddy's daily check-in (签到): while its event runs, a WorkBuddy
 // (China) account is given a few credits a day for pressing 签到 in the
 // app, more on a streak. While the setting is on, whichever magpie runs the
@@ -27,6 +37,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -279,6 +290,51 @@ func WorkBuddyCheckins() []WorkBuddyCheckin {
 		}
 	}
 	sort.SliceStable(out, func(i, j int) bool { return out[i].User < out[j].User })
+	return out
+}
+
+// WithCheckins is qs with each WorkBuddy (China) account's card told it
+// is checked in each day and how its last check-in went, for the Usage
+// page to say on the card (#694: having to look in Settings to know whether
+// it checked in is wrong). It holds for a moved account too: magpie checks
+// those in through the plugin's fetch. qs, which may be the usage cache,
+// is left as it is; nothing is asked.
+func WithCheckins(qs []SubscriptionQuota) []SubscriptionQuota {
+	return withCheckins(qs, wbCheckinAccounts(), readCheckins(wbCheckinPath()))
+}
+
+func withCheckins(qs []SubscriptionQuota, accts []wbAccount, st map[string]WorkBuddyCheckin) []SubscriptionQuota {
+	var on []wbAccount
+	for _, a := range accts {
+		if a.On && a.creds.UID != "" {
+			on = append(on, a)
+		}
+	}
+	if len(on) == 0 {
+		return qs
+	}
+	out := slices.Clone(qs)
+	for i, q := range out {
+		if q.Provider != wbCN.id {
+			continue
+		}
+		var a *wbAccount
+		for j := range on {
+			// a card without an account's name is the only account's
+			if strings.EqualFold(on[j].User, q.User) || q.User == "" && len(on) == 1 {
+				a = &on[j]
+				break
+			}
+		}
+		if a == nil {
+			continue
+		}
+		out[i].Checkins = true
+		if r, ok := st[wbCheckinKey(*a)]; ok {
+			r.User = a.User
+			out[i].Checkin = &r
+		}
+	}
 	return out
 }
 

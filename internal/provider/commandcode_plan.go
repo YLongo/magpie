@@ -1,5 +1,15 @@
 package provider
 
+// PLUGIN-SERVED (see AGENTS.md): Command Code's plan ("commandcode-plan") is
+// a deprecated built-in subscription served by its plugin,
+// @magpie-community/opencode-commandcode-auth, once moved onto it
+// (provider.Moved; the default for a new sign-in). A moved one's sign-ins,
+// models, requests and usage are all the plugin's, never this code's (only
+// the move, in migrate*.go, still reads its accounts). A fix here alone
+// doesn't reach those users; fix the plugin
+// (github.com/magpie-community/plugins, packages/commandcode) and raise the
+// mover's min in internal/provider/migrate_side.go.
+
 // A Command Code subscription is a commandcode.ai plan (Pro, GOAT, Max,
 // Ultra — every one but Go comes with API access). Signing in to it, as
 // `cmd auth login` does, mints an API key for the account; that key is
@@ -41,6 +51,22 @@ import (
 
 // CommandCodePlanID is the subscription's id, and its sign-in's.
 const CommandCodePlanID = "commandcode-plan"
+
+// CommandCodeMaxOutput is the most max_tokens Command Code takes at
+// /alpha/generate, for any model: more is refused ("Too big: expected
+// number to be <=200000 at params.max_tokens"). models.dev gives some of
+// its models more (DeepSeek V4's 384000, MiniMax M3's 512000).
+const CommandCodeMaxOutput = 200_000
+
+// CommandCodeOutputOf is the most a reply of a Command Code model may be
+// asked for: the model's own limit, as models.dev gives it, within
+// CommandCodeMaxOutput.
+func CommandCodeOutputOf(model string) int {
+	if n := catalog.OutputOf(model); n > 0 && n < CommandCodeMaxOutput {
+		return n
+	}
+	return CommandCodeMaxOutput
+}
 
 // Where Command Code's API and its sign-in page are; vars so tests can
 // point them elsewhere.

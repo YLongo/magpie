@@ -2,7 +2,7 @@
 // files — Claude Code's projects/*/<id>.jsonl (and Qoder's, the same kind),
 // Codex's rollout files, OpenCode's database (or its older JSON files) and
 // ZCode's, Pi's session files and omp's, DeepSeek Harness's, Cline's, Grok
-// Build's and WorkBuddy's — with the tokens each spent, what that cost at the
+// Build's, WorkBuddy's, Droid's, Cursor CLI's and Alma's chat stores — with the tokens each spent, what that cost at the
 // effective price, and the command that resumes it. It only ever reads the
 // agents' folders.
 //
@@ -29,6 +29,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/klauspost/compress/zstd"
 	"github.com/yetone/magpie/internal/catalog"
 	"github.com/yetone/magpie/internal/provider"
 	"github.com/yetone/magpie/internal/settings"
@@ -68,18 +69,22 @@ type Model struct {
 
 // Session is one agent session.
 type Session struct {
-	Agent  string    `json:"agent"` // magpie agent id: claude, codex, opencode, pi, omp, zcode, dsh, cline, qoder, qoder-cn, grok, workbuddy
-	ID     string    `json:"id"`
-	Cwd    string    `json:"cwd"`
-	Title  string    `json:"title"` // the first prompt, else the agent's own title
-	Start  time.Time `json:"start"`
-	Last   time.Time `json:"last"`
-	Models []Model   `json:"models"`
+	ReadOnly bool      `json:"read_only,omitempty"`
+	Agent    string    `json:"agent"` // magpie agent id: claude, codex, opencode, pi, omp, zcode, dsh, cline, qoder, qoder-cn, grok, workbuddy, droid, cursor, hermes, alma
+	ID       string    `json:"id"`
+	Cwd      string    `json:"cwd"`
+	Title    string    `json:"title"` // the first prompt, else the agent's own title
+	Start    time.Time `json:"start"`
+	Last     time.Time `json:"last"`
+	Models   []Model   `json:"models"`
 	Tokens
 	Cost     float64 `json:"cost"`     // USD at the effective price, for the priced models
 	Unpriced int     `json:"unpriced"` // models that spent tokens but have no known price
 	Resume   string  `json:"resume"`   // the command that picks the session up again
 	Path     string  `json:"path"`     // its (main) file
+	// WSL is the WSL distro the session ran in, its files read through
+	// \\wsl.localhost (see wsl.go); "" for this computer's own
+	WSL string `json:"wsl,omitempty"`
 }
 
 // PriceOf is the effective price of a model as a session names it, at the
@@ -92,6 +97,7 @@ const Limit = 200
 
 // state is what one file's parse has come to, enough to read on from Off.
 type state struct {
+	DBRevision  string            `json:"db_revision,omitempty"`
 	Head        string            `json:"head,omitempty"`
 	HeadSize    int               `json:"head_size,omitempty"`
 	ContentHash string            `json:"content_hash,omitempty"`
@@ -288,8 +294,19 @@ type file struct {
 	sid string
 	oc  ocStore
 	// Cline: the session's manifest, beside its messages; Grok Build: its
-	// summary.json, beside its updates
+	// summary.json, beside its updates; Droid: its settings, beside its
+	// transcript
 	manifest string
+	hermes   *hermesDB
+	// Alma: its database, and what tells the chat's rows changed
+	alma     *almaStore
+	rev      string
+	readOnly bool
+	// wsl: the WSL distro whose home it is in; cold: that distro isn't
+	// running, and the file, as last listed, is not to be opened (that
+	// would start the distro)
+	wsl  string
+	cold bool
 }
 
 // ClaudeDir is Claude Code's folder: $CLAUDE_CONFIG_DIR, else ~/.claude.
@@ -359,8 +376,8 @@ func ccFiles(agent, dir string) []file {
 func allFiles() []file {
 	var out []file
 	for _, fs := range [][]file{callFiles(), openCodeFiles(), piFiles(),
-		zcodeFiles(), dshFiles(), clineFiles(), ccFiles("qoder", QoderDir("qoder")), ccFiles("qoder-cn", QoderDir("qoder-cn")),
-		grokFiles(), workbuddyFiles(), ompFiles()} {
+		wslFiles("pi"), zcodeFiles(), dshFiles(), clineFiles(), ccFiles("qoder", QoderDir("qoder")), ccFiles("qoder-cn", QoderDir("qoder-cn")),
+		grokFiles(), workbuddyFiles(), droidFiles(), ompFiles(), cursorFiles(), hermesFiles(), almaFiles()} {
 		out = append(out, fs...)
 	}
 	return out
@@ -381,36 +398,73 @@ func Dirs() []string {
 		{GrokDir(), filepath.Join(GrokDir(), "sessions")},
 		{WorkBuddyDir(), filepath.Join(WorkBuddyDir(), "projects")},
 		{OmpDir(), filepath.Join(OmpDir(), "sessions")},
+		{FactoryDir(), filepath.Join(FactoryDir(), "sessions")},
+		{CursorDir(), filepath.Join(CursorDir(), "chats")},
+		{AlmaDir(), almaDB()},
 	} {
 		if _, err := os.Stat(d.sessions); err == nil {
 			out = append(out, d.dir)
 		}
 	}
+	out = append(out, HermesDirs()...)
+	out = append(out, wslDirs()...)
 	return out
 }
 
-// rollout-2026-09-20T15-48-28-<thread id>[_<segment>].jsonl
-var rolloutName = regexp.MustCompile(`^rollout-\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-([0-9A-Za-z-]+?)(?:_[0-9A-Za-z-]+)?\.jsonl$`)
+// rollout-2026-09-20T15-48-28-<thread id>[_<segment>].jsonl, and .jsonl.zst
+// once the Codex app's "compress local chat history" has packed an older one
+var rolloutName = regexp.MustCompile(`^rollout-\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-([0-9A-Za-z-]+?)(?:_[0-9A-Za-z-]+)?\.jsonl(?:\.zst)?$`)
 
-func codexFiles() []file {
+// zstSuffix ends a rollout the Codex app has compressed.
+const zstSuffix = ".zst"
+
+func codexFiles() []file { return codexFilesIn(CodexDir()) }
+
+// codexFilesIn are the rollouts in a Codex folder.
+func codexFilesIn(dir string) []file {
 	var out []file
-	root := filepath.Join(CodexDir(), "sessions")
-	filepath.WalkDir(root, func(p string, d os.DirEntry, err error) error {
-		if err != nil || d.IsDir() {
+	for _, folder := range []string{"sessions", "archived_sessions"} {
+		root := filepath.Join(dir, folder)
+		filepath.WalkDir(root, func(p string, d os.DirEntry, err error) error {
+			if err != nil || d.IsDir() {
+				return nil
+			}
+			m := rolloutName.FindStringSubmatch(d.Name())
+			if m == nil {
+				return nil
+			}
+			fi, err := d.Info()
+			if err != nil || !fi.Mode().IsRegular() {
+				return nil
+			}
+			out = append(out, file{agent: "codex", key: "codex:" + m[1], path: p, main: true, size: fi.Size(), mod: fi.ModTime()})
 			return nil
+		})
+	}
+	// During compression, prefer the readable plain twin in the same
+	// directory: the new compressed file may not have its trailer yet.
+	plain := map[string]bool{}
+	for _, f := range out {
+		if !strings.HasSuffix(f.path, zstSuffix) {
+			plain[f.path] = true
 		}
-		m := rolloutName.FindStringSubmatch(d.Name())
-		if m == nil {
-			return nil
+	}
+	kept := out[:0]
+	for _, f := range out {
+		if q, ok := strings.CutSuffix(f.path, zstSuffix); !ok || !plain[q] {
+			kept = append(kept, f)
 		}
-		fi, err := d.Info()
-		if err != nil || !fi.Mode().IsRegular() {
-			return nil
-		}
-		out = append(out, file{agent: "codex", key: "codex:" + m[1], path: p, main: true, size: fi.Size(), mod: fi.ModTime()})
-		return nil
-	})
-	return out
+	}
+	return distinctCodexFiles(kept)
+}
+
+// rolloutTwin is a Codex rollout's file in its other form: the compressed
+// one of a plain one, the plain one of a compressed one.
+func rolloutTwin(p string) string {
+	if q, ok := strings.CutSuffix(p, zstSuffix); ok {
+		return q
+	}
+	return p + zstSuffix
 }
 
 var (
@@ -438,7 +492,8 @@ func CachePath() string { return filepath.Join(filepath.Dir(catalog.CachePath())
 // 8: keep only summaries here; request metadata has per-file shards.
 // 9: validate the previous full prefix before treating growth as an append.
 // 10: Pi's and omp's prompts, replies, tool calls and skills.
-const cacheVersion = 10
+// 11: Codex's input without what it wrote to the cache (#589).
+const cacheVersion = 11
 
 type cacheFile struct {
 	Version int               `json:"version"`
@@ -562,7 +617,10 @@ func writeCache(c *save) {
 func refresh(want, all []file) {
 	var todo []file
 	for _, f := range want {
-		if s := cache[f.path]; s == nil || s.Size != f.size || s.Mod != f.mod.UnixNano() {
+		if f.cold {
+			continue // in a stopped WSL distro: what was read of it stands
+		}
+		if s := cache[f.path]; s == nil || s.Size != f.size || s.Mod != f.mod.UnixNano() || (f.agent == "hermes" && (f.hermes == nil || f.hermes.revision == "" || s.DBRevision != f.hermes.revision)) || (f.agent == "alma" && s.DBRevision != f.rev) {
 			todo = append(todo, f)
 		}
 	}
@@ -726,6 +784,7 @@ func Reset() {
 	directoryCache.entries = map[string]directoryEntry{}
 	directoryCache.Unlock()
 	resetCalls()
+	wslReset()
 	mu.Lock()
 	defer mu.Unlock()
 	saved()
@@ -793,7 +852,10 @@ func assemble(fs []file, price func(string) *catalog.Price) (Session, bool) {
 		}
 		return filepath.Base(fs[i].path) < filepath.Base(fs[j].path)
 	})
-	s := Session{Agent: fs[0].agent, Path: fs[0].path, Models: []Model{}}
+	s := Session{Agent: fs[0].agent, Path: fs[0].path, Models: []Model{}, WSL: fs[0].wsl}
+	for _, f := range fs {
+		s.ReadOnly = s.ReadOnly || f.readOnly
+	}
 	s.ID = strings.TrimPrefix(fs[0].key, s.Agent+":")
 	var named, first string
 	models := map[string]*Model{}
@@ -815,7 +877,7 @@ func assemble(fs []file, price func(string) *catalog.Price) (Session, bool) {
 			if first == "" {
 				first = st.First
 			}
-			if (s.Agent == "codex" || s.Agent == "pi" || s.Agent == "omp" || s.Agent == "dsh" || s.Agent == "grok") && st.ID != "" && f.path == fs[0].path {
+			if (s.Agent == "codex" || s.Agent == "pi" || s.Agent == "omp" || s.Agent == "dsh" || s.Agent == "grok" || s.Agent == "droid") && st.ID != "" && f.path == fs[0].path {
 				s.ID = st.ID
 			}
 		}
@@ -863,13 +925,19 @@ func assemble(fs []file, price func(string) *catalog.Price) (Session, bool) {
 	if s.Title == "" && s.Tokens.zero() {
 		return s, false // nothing was said in it
 	}
-	s.Resume = ResumeCommand(s.Agent, s.ID, s.Cwd)
+	if !s.ReadOnly {
+		s.Resume = resumeCommand(s.WSL, s.Agent, s.ID, s.Cwd)
+	}
 	return s, true
 }
 
 // parse reads a file on from where old left it, or from the start.
 func parse(f file, old *state) *state {
 	switch f.agent {
+	case "hermes":
+		return parseHermes(f)
+	case "alma":
+		return parseAlma(f)
 	case "opencode", "zcode":
 		return parseOpenCode(f)
 	case "dsh":
@@ -878,10 +946,14 @@ func parse(f file, old *state) *state {
 		return parseCline(f)
 	case "grok":
 		return parseGrok(f)
+	case "droid":
+		return parseDroid(f)
+	case "cursor":
+		return parseCursor(f)
 	}
 	headBytes := headOf(f.path)
 	var s *state
-	if old != nil && f.size >= old.Size && old.Off <= f.size && sameHead(headBytes, old.Head, old.HeadSize) && old.ContentHash != "" && prefixHash(f.path, old.Size) == old.ContentHash {
+	if old != nil && !packed(f.path) && f.size >= old.Size && old.Off <= f.size && sameHead(headBytes, old.Head, old.HeadSize) && old.ContentHash != "" && prefixHash(f.path, old.Size) == old.ContentHash {
 		s = old.clone()
 	} else {
 		s = &state{}
@@ -940,13 +1012,22 @@ func scanHead(path string, off int64, head func([]byte) bool, fn func([]byte)) (
 // scanAt is scanHead telling fn where each line starts and ends in the file,
 // and stopping when fn says so; what it returns is where the last line it
 // handled ended.
+// A compressed file's places are those of its lines decompressed; it is read
+// from its start, what comes before off passed over.
 func scanAt(path string, off int64, head func([]byte) bool, fn func(b []byte, start, end int64) bool) (int64, error) {
-	f, err := os.Open(path)
+	f, err := openLines(path)
 	if err != nil {
 		return off, err
 	}
 	defer f.Close()
-	if _, err := f.Seek(off, io.SeekStart); err != nil {
+	if s, ok := f.(io.Seeker); ok {
+		if _, err := s.Seek(off, io.SeekStart); err != nil {
+			return off, err
+		}
+	} else if _, err := io.CopyN(io.Discard, f, off); err != nil {
+		if errors.Is(err, io.EOF) {
+			return off, nil
+		}
 		return off, err
 	}
 	r := bufio.NewReaderSize(f, 1<<20)
@@ -989,6 +1070,38 @@ func scanAt(path string, off int64, head func([]byte) bool, fn func(b []byte, st
 		off += n
 		n, skip, seen, long = 0, false, false, long[:0]
 	}
+}
+
+// packed says whether a session file is compressed: a Codex rollout the
+// Codex app has packed (.zst), a dsh session (.zstd). A packed rollout is
+// written whole, so it is read whole again whenever it changes.
+func packed(path string) bool {
+	return strings.HasSuffix(path, zstSuffix) || strings.HasSuffix(path, ".zstd")
+}
+
+// openLines opens a session file to read its lines, a packed one decompressed.
+func openLines(path string) (io.ReadCloser, error) {
+	f, err := os.Open(path)
+	if err != nil || !packed(path) {
+		return f, err
+	}
+	d, err := zstd.NewReader(f, zstd.WithDecoderConcurrency(1), zstd.WithDecoderLowmem(true))
+	if err != nil {
+		f.Close()
+		return nil, err
+	}
+	return zstdFile{d.IOReadCloser(), f}, nil
+}
+
+// zstdFile is a packed file's lines, closed with the file.
+type zstdFile struct {
+	io.ReadCloser
+	f *os.File
+}
+
+func (z zstdFile) Close() error {
+	z.ReadCloser.Close()
+	return z.f.Close()
 }
 
 // tsAt reads the time of a line from its first (or last) "timestamp" key,
@@ -1093,7 +1206,11 @@ var safeID = regexp.MustCompile(`^[0-9A-Za-z_-]+$`)
 
 // ResumeCommand is the shell line that picks a session up again in its
 // folder, or "" for an id that isn't plain.
-func ResumeCommand(agent, id, cwd string) string {
+func ResumeCommand(agent, id, cwd string) string { return resumeCommand("", agent, id, cwd) }
+
+// resumeCommand is ResumeCommand for a session in a WSL distro too, when
+// distro is set: see wslResume.
+func resumeCommand(distro, agent, id, cwd string) string {
 	if !safeID.MatchString(id) {
 		return ""
 	}
@@ -1117,8 +1234,19 @@ func ResumeCommand(agent, id, cwd string) string {
 		run = "grok --resume " + id
 	case "omp":
 		run = "omp --resume " + id
+	case "droid":
+		run = "droid --resume " + id
+	case "cursor":
+		// its chats are looked up by the folder it runs in
+		if cwd == "" {
+			return ""
+		}
+		run = "cursor-agent --resume " + id
 	default:
 		return ""
+	}
+	if distro != "" {
+		return wslResume(distro, cwd, run)
 	}
 	if cwd == "" {
 		return run

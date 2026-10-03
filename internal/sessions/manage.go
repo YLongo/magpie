@@ -22,7 +22,9 @@ import (
 //
 // Only the agents whose sessions are files of their own can be deleted:
 // Claude Code's (and Qoder's and WorkBuddy's, kept the same way), Codex's,
-// Pi's and omp's. The agents' indexes are left as they are: Codex's
+// Pi's, omp's and Cursor CLI's (a chat's folder, its store and meta.json).
+// Hermes's and Alma's are rows in a database the agent keeps open and
+// writes, so they are only listed. The agents' indexes are left as they are: Codex's
 // session_index.jsonl (names by thread id) and its state database, and
 // Claude Code's history.jsonl (the prompts typed, for the up arrow), are
 // written by the agent while it runs, and a name or a prompt left for a
@@ -50,7 +52,7 @@ type AgentCount struct {
 // those kept as files of their own, in a layout magpie knows whole.
 func Deletable(agent string) bool {
 	switch agent {
-	case "claude", "qoder", "qoder-cn", "workbuddy", "codex", "pi", "omp":
+	case "claude", "qoder", "qoder-cn", "workbuddy", "codex", "pi", "omp", "cursor":
 		return true
 	}
 	return false
@@ -65,6 +67,8 @@ var ErrActive = errors.New("the session was written to in the last minute; it ma
 
 // Agents are the agents with sessions on this computer, by how many.
 func Agents() []AgentCount {
+	dbReadMu.Lock()
+	defer dbReadMu.Unlock()
 	mu.Lock()
 	defer mu.Unlock()
 	defer closeDBs()
@@ -111,10 +115,12 @@ func ListAgent(agent string) []Managed {
 	out := []Managed{}
 	for _, fs := range groups {
 		s, _ := assemble(fs, price)
-		if s.Resume == "" {
-			s.Resume = ResumeCommand(s.Agent, s.ID, s.Cwd)
+		if s.Resume == "" && !s.ReadOnly {
+			s.Resume = resumeCommand(s.WSL, s.Agent, s.ID, s.Cwd)
 		}
-		m := Managed{Session: s, Files: len(fs), Deletable: Deletable(agent)}
+		// a WSL distro's are listed and resumed, not deleted: magpie moves
+		// no files out of a distro
+		m := Managed{Session: s, Files: len(fs), Deletable: Deletable(agent) && !s.ReadOnly && s.WSL == ""}
 		for _, f := range fs {
 			m.Size += f.size
 			if st := cache[f.path]; st != nil && f.main {
@@ -202,6 +208,9 @@ func Delete(agent, id string) (Trashed, error) {
 	if len(fs) == 0 {
 		return Trashed{}, errors.New("no such session")
 	}
+	if s.WSL != "" {
+		return Trashed{}, fmt.Errorf("magpie doesn't delete sessions in WSL %s: delete it there", s.WSL)
+	}
 	paths := sessionPaths(agent, id, fs)
 	now := time.Now()
 	for _, p := range paths {
@@ -251,9 +260,28 @@ func sessionPaths(agent, id string, fs []file) []string {
 			out = append(out, p)
 		}
 	}
+	if agent == "cursor" {
+		// a chat is its folder, its subagents' chats theirs, and the
+		// transcripts Cursor wrote of it
+		cwd := ""
+		for _, f := range fs {
+			add(filepath.Dir(f.path))
+			if st := cache[f.path]; st != nil && f.main {
+				cwd = st.Cwd
+			}
+		}
+		for _, p := range cursorTranscripts(cwd, id) {
+			add(p)
+		}
+		return out
+	}
 	for _, f := range fs {
 		if f.main {
 			add(f.path)
+			// the compressed form a rollout is read past while both are there
+			if agent == "codex" {
+				add(rolloutTwin(f.path))
+			}
 			// the folder beside it: a Claude Code session's subagents and
 			// tool results, an omp session's artifacts
 			if agent != "codex" && agent != "pi" {
@@ -341,8 +369,10 @@ func move(from, to string) error {
 	if _, err := os.Lstat(to); err == nil {
 		return fmt.Errorf("%s is already there", to)
 	}
-	if os.Rename(from, to) == nil {
+	if err := os.Rename(from, to); err == nil {
 		return nil
+	} else if !errors.Is(err, crossDeviceErr) {
+		return err
 	}
 	if err := copyAll(from, to); err != nil {
 		os.RemoveAll(to)
@@ -364,6 +394,13 @@ func copyAll(from, to string) error {
 		}
 		if d.IsDir() {
 			return os.MkdirAll(dst, fi.Mode().Perm()|0o700)
+		}
+		if fi.Mode()&os.ModeSymlink != 0 {
+			target, err := os.Readlink(p)
+			if err != nil {
+				return err
+			}
+			return copySymlink(target, dst, fi)
 		}
 		if !fi.Mode().IsRegular() {
 			return nil
@@ -413,6 +450,28 @@ func trashFolder(key string) string {
 		return ""
 	}
 	return filepath.Join(TrashDir(), agent, name)
+}
+
+// Purge erases a trashed session for good: its folder in magpie's trash,
+// files and note. Only when the reader asks for it (#487); nothing is ever
+// erased by itself. A key that isn't a trashed session's, or whose folder
+// (or its agent's) is a link that could lead out of the trash, is refused.
+func Purge(key string) error {
+	dir := trashFolder(key)
+	if dir == "" {
+		return errors.New("no such deleted session")
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	for _, p := range []string{filepath.Dir(dir), dir} {
+		if fi, err := os.Lstat(p); err != nil || !fi.IsDir() {
+			return errors.New("no such deleted session")
+		}
+	}
+	if fi, err := os.Lstat(filepath.Join(dir, manifest)); err != nil || !fi.Mode().IsRegular() {
+		return errors.New("no such deleted session")
+	}
+	return os.RemoveAll(dir)
 }
 
 // Restore moves a trashed session's files back where they were. Nothing is
