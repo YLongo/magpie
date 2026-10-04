@@ -442,19 +442,9 @@ input.lib-setname:focus { border-color: var(--accent); box-shadow: 0 0 0 3px col
 .lib-subhead .sub { margin: 0; font-size: 11px; color: var(--faint); font-variant-numeric: tabular-nums; }
 .lib-subhead .lib-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--accent); flex: none; }
 .lib-row.lib-subhead:hover { background: color-mix(in srgb, var(--card-2) 70%, var(--pill)); }
-/* a skill's projects as one count: click it to say which, in a dialog */
-.lib-projcount { display: inline-flex; align-items: center; gap: 4px; height: 22px; padding: 0 9px 0 7px; border-radius: 11px; background: var(--pill); color: var(--muted); font-size: 11.5px; font-variant-numeric: tabular-nums; flex: none; }
-.lib-projcount svg { color: var(--faint); }
-.lib-projcount:hover { background: var(--pill-hover); color: var(--fg); }
-.lib-projcount.warn { box-shadow: inset 0 0 0 1px var(--amber); }
-.lib-pick.warn { box-shadow: inset 0 0 0 1px var(--amber); border-radius: 8px; }
-/* a project row in the picker: its folder on the left, what's done to it right */
-.lib-pick.lib-pickproj { align-items: center; }
-.lib-pickproj .who { flex: 1 1 auto; min-width: 0; }
-.lib-pickacts { display: flex; align-items: center; gap: 6px; flex: none; }
+/* the modal's one-line copy under its list */
 .lib-modalcopy { grid-column: 1 / -1; display: flex; align-items: center; gap: 8px; padding-top: 2px; }
 .lib-modalcopy .note { color: var(--muted); font-size: 11.5px; }
 .lib-modalhint { grid-column: 1 / -1; font-size: 11.5px; color: var(--muted); line-height: 1.5; }
-.lib-addline { display: flex; flex-direction: column; gap: 5px; padding: 8px 6px 2px; }
 /* no color-mix() before Safari 16.2 (#220): the sticky head stays opaque */
 @supports not (color: color-mix(in srgb, red 50%, blue)) { .lib-head { background: var(--bg); } }

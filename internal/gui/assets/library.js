@@ -2043,137 +2043,6 @@
 
 
 
-  // A project is one row: its folder, a count of the library's skills it
-  // has, and the three things done to it — copies or links, more skills,
-  // or its removal. Which skills it has is set from each skill's own row.
-
-  // A skill's projects in one number, however many there are: click it to
-  // say which, in a dialog of the projects. Zero shows too — the way in
-  // is always there to find. A placement that couldn't be made warns.
-  function projectCount(s) {
-    const inP = lib.projects.filter((p) => p.skills[s.name]);
-    const problem = lib.projects.some((p) => p.problems?.[s.name]);
-    const b = button("", "lib-projcount" + (problem ? " warn" : ""), () => projectPicker(s));
-    b.append(svg(GLYPH.folder, 12, 1.4), el("span", "n", String(inP.length)));
-    b.title = inP.length
-      ? t("In {projects} — click to change", { projects: inP.map((p) => p.name).join(", ") })
-      : t("In no project — click to give it to some");
-    return b;
-  }
-
-  // A skill and its projects — and the projects themselves: a row each,
-  // ticked when the skill is in one, one click either way, with what's
-  // done to a project right there too. Adding one is a line at the end.
-  function projectPicker(s) {
-    const ids = () => projectAgents().map((a) => a.id);
-    let adding = false;
-    const ed = el("div", "editor lib-editor");
-    const list = el("div", "lib-picklist");
-    const syncAll = () => {
-      const on = lib.projects.length && lib.projects.every((p) => p.skills[s.name]);
-      allBtn.textContent = on ? t("Select none") : t("Select all");
-    };
-    const draw = () => {
-      const rows = [];
-      for (const p of lib.projects) {
-        const on = !!p.skills[s.name];
-        const problem = p.problems?.[s.name];
-        // a div, not a label: the editor right-aligns its form labels
-        const r = el("div", "lib-pick lib-pickproj" + (problem ? " warn" : ""));
-        const c = el("input");
-        c.type = "checkbox";
-        c.checked = on;
-        c.onchange = async () => {
-          const want = c.checked;
-          const ok = await change("projects/skill", { dir: p.dir, name: s.name, agents: want ? ids() : [] },
-            want ? t("{skill} is in {project}", { skill: s.name, project: p.name }) : t("{skill} is out of {project}", { skill: s.name, project: p.name }));
-          if (!ok) c.checked = !want;
-          draw();
-          syncAll();
-        };
-        r.onclick = (e) => { if (e.target !== c && !e.target.closest("button")) { c.checked = !c.checked; c.onchange(); } };
-        const w = el("span", "who");
-        w.append(el("span", "name", p.name));
-        w.append(el("span", "sub", problem || tilde(p.dir)));
-        const n = Object.keys(p.skills).length;
-        const acts = el("div", "lib-pickacts");
-        acts.append(tag(n === 1 ? t("1 skill") : n ? t("{n} skills", { n }) : t("No skills yet"), n ? "lib-dot" : "lib-unchecked"));
-        const all = projectAgents();
-        const more = button("", "lib-icon", () => addSkillsModal(p, all));
-        more.append(svg(GLYPH.plus, 13, 1.4));
-        more.title = all.length ? t("Pick many of the library's skills for {name} at once", { name: p.name }) : t("No agent shown reads a project's skills folder");
-        more.disabled = !all.length;
-        const rm = button("", "lib-icon danger", () => confirmRemoveProject(p));
-        rm.append(svg(GLYPH.trash, 13, 1.4));
-        rm.title = t("Remove the project");
-        acts.append(more, rm);
-        r.append(c, w, el("span", "grow"), acts);
-        if (problem) w.append(tag(t("Not placed"), "warn", problem));
-        rows.push(r);
-      }
-      if (!lib.projects.length) rows.push(el("div", "list lib-none", t("No projects yet — add one below.")));
-      if (adding) rows.push(addProjectLine(() => { adding = false; draw(); }));
-      allBtn.disabled = !lib.projects.length;
-      list.replaceChildren(...rows);
-    };
-    const allBtn = button(t("Select all"), "", async () => {
-      const off = lib.projects.every((p) => p.skills[s.name]);
-      try {
-        for (const p of lib.projects.filter((x) => off ? x.skills[s.name] : !x.skills[s.name])) {
-          take(await api("library/projects/skill", { dir: p.dir, name: s.name, agents: off ? [] : ids() }));
-        }
-        render();
-        status(off ? t("{skill} is out of every project", { skill: s.name }) : t("{skill} is in every project", { skill: s.name }), "ok");
-      } catch (e) { status(e.message, "err", 6000); }
-      draw();
-      syncAll();
-    });
-    const head = el("div", "ehead");
-    head.append(glyph(GLYPH.skill), el("b", "", t("{skill}'s projects", { skill: s.name })), el("span", "grow"), allBtn);
-    const bar = el("div", "bar");
-    bar.append(button(t("Add a project"), "action", () => { adding = true; draw(); }), el("span", "grow"), button(t("Close"), "", closeLibModal));
-    ed.append(head, list, bar);
-    draw();
-    syncAll();
-    modal = { save: closeLibModal };
-    openLib(ed);
-  }
-
-  // a line to add a project, in the picker: type the folder or choose it
-  function addProjectLine(onAdded) {
-    const box = el("div", "lib-addline");
-    const line = el("div", "lib-find");
-    const st = { dir: "", busy: false };
-    const inp = el("input");
-    inp.type = "text";
-    inp.placeholder = t("The project's folder, like ~/code/app");
-    inp.spellcheck = false;
-    inp.autocomplete = "off";
-    inp.oninput = () => { st.dir = inp.value; };
-    const err = el("div", "lib-err");
-    async function add() {
-      const dir = st.dir.trim();
-      if (!dir || st.busy) return;
-      st.busy = true;
-      try {
-        take(await api("library/projects/add", { dir }));
-
-        status(t("{name} added — pick the skills it gets", { name: dir }), "ok");
-        onAdded();
-      } catch (e) { st.busy = false; err.textContent = e.message; }
-    }
-    inp.onkeydown = (e) => { e.stopPropagation(); if (e.key === "Enter") add(); else if (e.key === "Escape") box.remove(); };
-    line.append(glyph(GLYPH.folder, "lib-mini"), inp);
-    if (!web) {
-      line.append(button(t("Choose…"), "", async () => {
-        try { const r = await api("library/projects/choose", {}); if (r.dir) { st.dir = r.dir; inp.value = r.dir; } } catch (e) { status(e.message, "err", 6000); }
-      }));
-    }
-    line.append(button(t("Add"), "action", () => add()), button(t("Cancel"), "", () => { box.remove(); }));
-    box.append(line, err);
-    return box;
-  }
-
   function renderProjects(body, kind) {
     const rh = el("div", "row-head");
     rh.append(el("span", "label", t("In projects")), el("span", "grow"));
@@ -2242,6 +2111,15 @@
       if (!names.length) pills.append(tag(mcp ? t("No servers yet") : t("No skills yet"), "lib-unchecked"));
     }
     const acts = el("div", "lib-rowacts");
+    // the fork's batch: many of the library's skills into this one project
+    if (!mcp) {
+      const all = projectAgents();
+      const more = button("", "lib-icon", () => addSkillsModal(p, all));
+      more.append(svg(GLYPH.plus, 13, 1.4));
+      more.title = all.length ? t("Pick many of the library's skills for {name} at once", { name: p.name }) : t("No agent shown reads a project's skills folder");
+      more.disabled = !all.length;
+      acts.append(more);
+    }
     const rm = button("", "lib-icon danger", () => confirmRemoveProject(p));
     rm.append(svg(GLYPH.trash, 13, 1.4));
     rm.title = t("Remove the project");
@@ -2972,7 +2850,7 @@
     rm.append(svg(GLYPH.trash, 13, 1.4));
     rm.title = t("Remove");
     acts.append(rm);
-    row.append(mark(s.icon, GLYPH.skill), who, acts, agentChips(all, s.agents, chipsChange("skills/agents", s.name, "skills", (x) => skillRow(x, all)), { problems: s.problems, via: viaFor(s), all: true, always: alwaysFor(s) }), projectCount(s));
+    row.append(mark(s.icon, GLYPH.skill), who, acts, agentChips(all, s.agents, chipsChange("skills/agents", s.name, "skills", (x) => skillRow(x, all)), { problems: s.problems, via: viaFor(s), all: true, always: alwaysFor(s) }));
     row.onclick = () => viewSkill(s);
     row.title = t("Read {name}'s SKILL.md", { name: s.name });
     return row;
