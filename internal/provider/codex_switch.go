@@ -86,6 +86,35 @@ func usedUp(q SubscriptionQuota) bool {
 	return usedPast(q, 100)
 }
 
+// UsedUp is usedUp for the CLI's magpie quota wait, so what it waits out
+// is what stops an account here.
+func UsedUp(q SubscriptionQuota) bool { return usedUp(q) }
+
+// BackAt is when a used-up account has room again: when the last of the
+// windows that stop it (usedUp's) starts again, a window's seconds to go
+// counted from now. Zero when one of them doesn't say.
+func BackAt(q SubscriptionQuota, now time.Time) time.Time {
+	var back time.Time
+	for _, w := range q.Windows {
+		if w.Aside || w.Model != "" || w.Used < 100 {
+			continue
+		}
+		var at time.Time
+		switch {
+		case w.ResetsAt != nil:
+			at = *w.ResetsAt
+		case w.ResetSecs > 0:
+			at = now.Add(time.Duration(w.ResetSecs) * time.Second)
+		default:
+			return time.Time{}
+		}
+		if at.After(back) {
+			back = at
+		}
+	}
+	return back
+}
+
 func usedPast(q SubscriptionQuota, share float64) bool {
 	for _, w := range q.Windows {
 		if !w.Aside && w.Model == "" && w.Used >= share {
@@ -137,8 +166,15 @@ func NextLogin(ctx context.Context, agent string) (from, to string, back, ok boo
 		return from, first.User, true, true
 	}
 	u := LoginUsage(ctx, agent)
+	now := time.Now()
+	// an account at its usage cap is spent as one at the share below
+	// (account_caps.go): it is moved off, and none is moved to or back to
+	// till the window it filled renews
+	capped := func(user string, q SubscriptionQuota) bool {
+		return capReached(q, AccountCapOf(agent, user), now)
+	}
 	if first != nil && first.On && first.Lapsed == "" {
-		if q, known := u[first.User]; known && q.Error == "" && !usedPast(q, backShare) {
+		if q, known := u[first.User]; known && q.Error == "" && !usedPast(q, backShare) && !capped(first.User, q) {
 			return from, first.User, true, true
 		}
 	}
@@ -146,18 +182,17 @@ func NextLogin(ctx context.Context, agent string) (from, to string, back, ok boo
 	if q.Provider == "claude" && q.AsOf != nil {
 		// An expired cached window cannot say whether this account is spent
 		// now. Keep other windows and the stored historical reading intact.
-		now := time.Now()
 		q.Windows = slices.DeleteFunc(slices.Clone(q.Windows), func(w QuotaWindow) bool {
 			return w.ResetsAt != nil && !w.ResetsAt.After(now)
 		})
 	}
 	// kept on the first, it stays there however little that has left; and
 	// it moves on at the share its routing counts the account spent at
-	if keep || !known || q.Error != "" || !usedPast(q, share) {
+	if keep || !known || q.Error != "" || !usedPast(q, share) && !capped(from, q) {
 		return "", "", false, false
 	}
 	for _, l := range spares {
-		if q, known := u[l.User]; known && q.Error == "" && !usedPast(q, share) {
+		if q, known := u[l.User]; known && q.Error == "" && !usedPast(q, share) && !capped(l.User, q) {
 			return from, l.User, false, true
 		}
 	}
@@ -254,15 +289,16 @@ func setLoginReturn(agent string, r loginReturn) {
 	}
 }
 
-// codexWasUsedUp is whether the account Codex is signed in to was out of
-// its allowance at the last look.
+// codexWasUsedUp is whether the account Codex is signed in to was out
+// (CodexUsedUp) at the last look.
 var codexWasUsedUp atomic.Bool
 
 // noteCodexUsedUp tells the agents' files when the account Codex is signed
-// in to runs out of its allowance, or has it back: the Codex app sends
-// nothing at all for an account that is out, a magpie model's turn
-// included, so the agent package then makes magpie Codex's provider, and
-// puts it back beside the sign-in after (#540). Only a change is told.
+// in to runs out (CodexUsedUp: of its allowance and its credits), or has
+// room again: the Codex app sends nothing at all for an account that is
+// out, a magpie model's turn included, so the agent package then makes
+// magpie Codex's provider, and puts it back beside the sign-in after
+// (#540). Only a change is told.
 func noteCodexUsedUp(now bool) {
 	if codexWasUsedUp.Swap(now) != now {
 		catalog.Touched()

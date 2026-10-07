@@ -20,7 +20,7 @@
 (() => {
   const root = document.documentElement;
   const lang = (root.lang || "en").slice(0, 2);
-  const T = (en, zh, ja) => ({ zh, ja })[lang] ?? en;
+  const T = (en, zh, ja, de) => ({ zh, ja, de })[lang] ?? en;
   const KEY = "omarchy";
   const GATEWAY = "http://127.0.0.1:3425/v1/magpie/omarchy";
   // Omarchy 4's themes (/usr/share/omarchy/themes/*/colors.toml): mode,
@@ -128,27 +128,41 @@
   }
 
   // magpie's screenshots as magpie draws itself on Omarchy: its own windows
-  // shot in tokyo-night (dark) and catppuccin-latte (light), in place of the
-  // page's, as wide as before; shots not taken there keep the page's
+  // shot in each of Omarchy's themes (/img/omarchy/<theme>/), in place of the
+  // page's, as wide as before, and shot again as the theme turns; a theme of
+  // the reader's own takes Omarchy's default for its light or dark; shots not
+  // taken there keep the page's
   const SHOTS = {
     "add": [2016, 1600], "agents": [2080, 1078], "import": [1280, 1120], "panel": [880, 1000], "picker": [880, 1320],
-    "providers": [2080, 1004], "routing": [2080, 1666], "routing-zh": [2080, 1592], "usage": [2080, 1004],
-    "nested-routing": [2080, 1434], "nested-routing-zh": [2080, 1362], "intent-rules": [2012, 2150], "intent-rules-zh": [2012, 2088],
+    "providers": [2080, 1004], "routing": [2080, 1666], "routing-zh": [2080, 1592], "routing-ja": [2080, 1630], "agents-ja": [2080, 1344], "usage": [2080, 1004],
+    "nested-routing": [2080, 1434], "nested-routing-zh": [2080, 1362], "nested-routing-ja": [2080, 1470], "intent-rules": [2012, 2150], "intent-rules-zh": [2012, 2088], "intent-rules-ja": [2012, 2536],
     "intent-routing-hit": [2080, 1220], "intent-routing-hit-zh": [2080, 1112], "intent-trace": [2016, 964], "intent-trace-zh": [2016, 892],
   };
+  // shot in Chinese and in Japanese too (-zh, -ja)
   const ZH = new Set(["add", "agents", "import", "routing", "usage", "nested-routing", "intent-rules", "intent-routing-hit", "intent-trace"]);
-  let shot = false;
   function shots() {
-    if (shot) return;
+    if (!cur) return;
     if (document.readyState === "loading") { document.addEventListener("DOMContentLoaded", shots, { once: true }); return; }
-    shot = true;
-    for (const img of document.querySelectorAll('img[src^="/img/"]')) {
-      const m = img.getAttribute("src").match(/^\/img\/([a-z]+(?:-[a-z]+)*?)(-zh)?-(dark|light)\.png$/);
+    const set = THEMES[cur.name] ? cur.name : GUESS[cur.mode];
+    for (const img of document.querySelectorAll('img[src^="/img/"], img[data-om-src]')) {
+      const was = img.dataset.omSrc || img.getAttribute("src");
+      const m = was.match(/^\/img\/([a-z]+(?:-[a-z]+)*?)(-zh|-ja)?-(dark|light)\.png$/);
       if (!m || !SHOTS[m[1]] || (m[2] && !ZH.has(m[1]))) continue;
-      const [w, h] = SHOTS[m[1] + (m[2] || "")] || SHOTS[m[1]];
-      const width = +img.getAttribute("width");
-      if (width) img.setAttribute("height", Math.round((width * h) / w));
-      img.src = `/img/omarchy/${m[1]}${m[2] || ""}-${m[3]}.png`;
+      const src = `/img/omarchy/${set}/${m[1]}${m[2] || ""}.webp`;
+      if (!img.dataset.omSrc) {
+        img.dataset.omSrc = was;
+        const [w, h] = SHOTS[m[1] + (m[2] || "")] || SHOTS[m[1]];
+        const width = +img.getAttribute("width");
+        if (width) img.setAttribute("height", Math.round((width * h) / w));
+        img.src = src;
+      } else {
+        // the shot shown until the next one is in, not a blank
+        img.dataset.omWant = src;
+        if (img.getAttribute("src") === src) continue;
+        const next = new Image();
+        next.onload = () => { if (img.dataset.omWant === src) img.src = src; };
+        next.src = src;
+      }
     }
   }
   // the page's own light/dark switch follows the system; Omarchy's mode wins
@@ -163,13 +177,15 @@
     if (st.pick && THEMES[st.pick]) return builtin(st.pick);
     const live = st.live && fromMagpie(st.live);
     if (live) return live;
-    return builtin(GUESS[matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark"]);
+    return builtin(GUESS[scheme()]);
   }
+  const light = matchMedia("(prefers-color-scheme: light)");
+  function scheme() { return light.matches ? "light" : "dark"; }
 
   // magpie on this computer: "live" (it answered), "ask" (the browser will
   // ask the reader first), "denied" (the reader said no), "absent" (no magpie
   // answered), "" (not asked yet)
-  let status = "", timer = 0, reached = false;
+  let status = "", timer = 0, reached = false, missed = 0, asks = 0;
   async function allowed() {
     for (const name of ["loopback-network", "local-network-access"]) {
       try { return (await navigator.permissions.query({ name })).state; } catch {}
@@ -178,6 +194,7 @@
   }
   async function ask(byReader) {
     clearTimeout(timer);
+    const n = ++asks; // a later ask (both permissions turning) polls in its place
     if (!byReader && !reached) {
       const s = await allowed();
       if (s !== "granted") { status = s === "denied" ? "denied" : "ask"; render(); return; }
@@ -185,7 +202,7 @@
     try {
       const ctl = new AbortController();
       // the reader may be answering the browser's question meanwhile
-      const t = setTimeout(() => ctl.abort(), byReader ? 120000 : 3000);
+      const t = setTimeout(() => ctl.abort(), byReader ? 120000 : 5000);
       const r = await fetch(GATEWAY, { cache: "no-store", signal: ctl.signal });
       clearTimeout(t);
       if (!r.ok) throw new Error(r.status);
@@ -193,6 +210,7 @@
       const p = fromMagpie(th);
       if (!p) throw new Error("theme");
       status = "live";
+      missed = 0;
       reached = true; // the browser let it through: asked again freely
       const keep = { name: th.name, mode: th.mode, stamp: th.stamp, vars: th.vars };
       const changed = !st.live || st.live.stamp !== th.stamp;
@@ -200,20 +218,50 @@
       save();
       if (!st.pick && (changed || !cur || cur.name !== p.name)) paint(p); else render();
     } catch {
-      status = byReader && (await allowed()) === "denied" ? "denied" : "absent";
-      render();
+      // once reached, one slow answer (Omarchy setting a theme reloads
+      // Hyprland meanwhile) isn't magpie gone: asked again as often
+      if (byReader || !reached || ++missed > 1) {
+        status = byReader && (await allowed()) === "denied" ? "denied" : "absent";
+        render();
+      }
     }
     // followed while the page shows: a theme picked in Omarchy's menu comes
     // through within seconds
-    if (!st.pick && document.visibilityState === "visible" && status !== "ask" && status !== "denied") {
-      timer = setTimeout(() => ask(false), status === "live" ? 3000 : 30000);
+    if (n === asks && !st.pick && document.visibilityState === "visible" && status !== "ask" && status !== "denied") {
+      timer = setTimeout(() => ask(false), status === "live" || reached ? 3000 : 30000);
     }
   }
   document.addEventListener("visibilitychange", () => {
     if (document.visibilityState === "visible" && cur && !st.pick && status !== "ask" && status !== "denied") ask(false);
   });
 
+  // until magpie answers, Omarchy's default for light or dark follows the
+  // desktop as it turns (a theme set in Omarchy's menu turns it), and a page
+  // the browser lets through later (its prompt, its site settings) starts
+  // following then, both without a reload
+  let watching = false;
+  function watch() {
+    if (watching) return;
+    watching = true;
+    light.addEventListener("change", () => {
+      if (!cur || st.pick || status === "live") return;
+      const live = st.live && st.live.mode === scheme() && fromMagpie(st.live);
+      // the theme magpie last told is off the desktop now: a reload shows
+      // what this shows, not that one
+      if (!live && st.live) { delete st.live; save(); }
+      paint(live || builtin(GUESS[scheme()]));
+    });
+    for (const name of ["loopback-network", "local-network-access"]) {
+      navigator.permissions?.query({ name }).then((p) => p.addEventListener("change", () => {
+        if (!cur || st.pick || status === "live") return;
+        if (p.state === "granted") ask(false);
+        else if (p.state === "denied") { clearTimeout(timer); status = "denied"; render(); }
+      }), () => {});
+    }
+  }
+
   function start() {
+    watch();
     paint(choose());
     if (!st.pick) ask(false);
   }
@@ -236,30 +284,34 @@
       document.addEventListener("keydown", (e) => { if (open && e.key === "Escape") { open = false; render(); bar.querySelector(".om-chip")?.focus(); } });
     }
     if (!cur) {
-      bar.innerHTML = `<button class="om-chip om-off" type="button" title="${esc(T("Omarchy look", "Omarchy 风格", "Omarchy スタイル"))}"><span class="om-logo" aria-hidden="true"></span></button>`;
+      bar.innerHTML = `<button class="om-chip om-off" type="button" title="${esc(T("Omarchy look", "Omarchy 风格", "Omarchy スタイル", "Omarchy-Look"))}"><span class="om-logo" aria-hidden="true"></span></button>`;
       return;
     }
     const following = !st.pick;
     const note = {
-      live: T(`Following ${cur.name} via magpie`, `正在跟随 ${cur.name}（来自 magpie）`, `magpie 経由で ${cur.name} に追従中`),
-      ask: T("Ask magpie on this computer for the theme", "向本机的 magpie 询问当前主题", "このコンピュータの magpie にテーマを尋ねる"),
-      denied: T("The browser blocks this page from reaching magpie", "浏览器禁止了本页访问本机的 magpie", "ブラウザがこのページから magpie への接続をブロックしています"),
-      absent: T("magpie isn't running on this computer", "本机没有运行 magpie", "このコンピュータで magpie が動いていません"),
-      "": T("Asking magpie…", "正在询问 magpie…", "magpie に問い合わせ中…"),
+      live: T(`Following ${cur.name} via magpie`, `正在跟随 ${cur.name}（来自 magpie）`, `magpie 経由で ${cur.name} に追従中`, `Folgt ${cur.name} über magpie`),
+      ask: T("Ask magpie on this computer for the theme", "向本机的 magpie 询问当前主题", "このコンピュータの magpie にテーマを尋ねる", "magpie auf diesem Rechner nach dem Theme fragen"),
+      denied: T("The browser blocks this page from reaching magpie", "浏览器禁止了本页访问本机的 magpie", "ブラウザがこのページから magpie への接続をブロックしています", "Der Browser verhindert, dass diese Seite magpie erreicht"),
+      absent: T("magpie isn't running on this computer", "本机没有运行 magpie", "このコンピュータで magpie が動いていません", "magpie läuft auf diesem Rechner nicht"),
+      "": T("Asking magpie…", "正在询问 magpie…", "magpie に問い合わせ中…", "Frage magpie …"),
     }[status];
     const rows = Object.keys(THEMES).map((n) => {
       const [mode, bg, fg, , , accent] = THEMES[n].split(" ");
       const on = st.pick === n ? " on" : "";
       return `<button class="om-row${on}" type="button" role="menuitemradio" aria-checked="${!!on}" data-pick="${n}"><span class="om-sw" style="background:#${bg};color:#${fg}"><i style="background:#${accent}"></i><i style="background:#${fg}"></i></span>${n}${mode === "light" ? ' <span class="om-dim">light</span>' : ""}</button>`;
     }).join("");
-    bar.innerHTML = `<button class="om-chip${status === "live" && following ? " live" : ""}" type="button" aria-haspopup="menu" aria-expanded="${open}"><span class="om-logo" aria-hidden="true"></span><span class="om-name">${esc(cur.name || "omarchy")}</span></button>`
+    // not let through yet: the chip says what one click does
+    const cta = status === "ask" && following && !open
+      ? `<button class="om-cta" type="button" data-ask title="${esc(T("Your browser will ask to let this page reach magpie on this computer", "浏览器会询问是否允许本页访问本机的 magpie", "このページがこのコンピュータの magpie に接続してよいか、ブラウザが尋ねます", "Ihr Browser fragt, ob diese Seite magpie auf diesem Rechner erreichen darf"))}">${esc(T("Follow my Omarchy theme", "跟随 Omarchy 主题", "Omarchy のテーマに合わせる", "Meinem Omarchy-Theme folgen"))}</button>`
+      : "";
+    bar.innerHTML = cta + `<button class="om-chip${status === "live" && following ? " live" : ""}" type="button" aria-haspopup="menu" aria-expanded="${open}"><span class="om-logo" aria-hidden="true"></span><span class="om-name">${esc(cur.name || "omarchy")}</span></button>`
       + (open ? `<div class="om-menu" role="menu">
         <div class="om-h">Omarchy</div>
-        <button class="om-row${following ? " on" : ""}" type="button" role="menuitemradio" aria-checked="${following}" data-pick=""><span class="om-sw om-follow"></span>${esc(T("Follow this computer", "跟随这台电脑", "このコンピュータに合わせる"))}</button>
-        <div class="om-note">${status === "ask" ? `<button class="om-ask" type="button" data-ask>${esc(note)} →</button>` : esc(note)}${status === "absent" ? ` · <a href="/#download">${esc(T("Get magpie", "下载 magpie", "magpie を入手"))}</a>` : ""}</div>
-        <div class="om-h">${esc(T("Themes", "主题", "テーマ"))}</div>
+        <button class="om-row${following ? " on" : ""}" type="button" role="menuitemradio" aria-checked="${following}" data-pick=""><span class="om-sw om-follow"></span>${esc(T("Follow this computer", "跟随这台电脑", "このコンピュータに合わせる", "Diesem Rechner folgen"))}</button>
+        <div class="om-note">${status === "ask" ? `<button class="om-ask" type="button" data-ask>${esc(note)} →</button>` : esc(note)}${status === "absent" ? ` · <a href="/#download">${esc(T("Get magpie", "下载 magpie", "magpie を入手", "magpie holen"))}</a>` : ""}</div>
+        <div class="om-h">${esc(T("Themes", "主题", "テーマ", "Themes"))}</div>
         <div class="om-list">${rows}</div>
-        <button class="om-row om-quit" type="button" data-off>${esc(T("Turn off Omarchy look", "关闭 Omarchy 风格", "Omarchy スタイルをオフ"))}</button>
+        <button class="om-row om-quit" type="button" data-off>${esc(T("Turn off Omarchy look", "关闭 Omarchy 风格", "Omarchy スタイルをオフ", "Omarchy-Look ausschalten"))}</button>
       </div>` : "");
   }
   function onClick(e) {

@@ -67,8 +67,8 @@ function serve(lang, theme, panel, data) {
 }
 
 const words = {
-  en: { head: "Left over time", two: "2 days", cycle: "Cycle", off: "Off", trend: (r) => "Trends: " + r, five: "5 hours", week: "Weekly" },
-  zh: { head: "剩余额度走势", two: "2 天", cycle: "本周期", off: "关闭", trend: (r) => "走势：" + r, five: "5 小时", week: "每周" },
+  en: { head: "Left over time", two: "2 days", cycle: "Cycle", off: "Off", trend: (r) => "Trends: " + r, five: "5 hours", week: "Weekly", dashes: /Dashed: an even pace/ },
+  zh: { head: "剩余额度走势", two: "2 天", cycle: "本周期", off: "关闭", trend: (r) => "走势：" + r, five: "5 小时", week: "每周", dashes: /虚线：匀速用量/ },
 };
 
 for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium", "webkit"])) {
@@ -112,6 +112,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         // cycle, faint and without its upright even burn
         assert.equal(await curve.locator("path.qc-line").count(), 2);
         assert.equal(await curve.locator("line.qc-even").count(), 1);
+        assert.match(await curve.getAttribute("title"), w.dashes, "hovering the plot says what the dashes are");
         assert.equal(await curve.locator("path.qc-line.qc-short").getAttribute("data-name"), "5 hours");
         assert.equal(await curve.locator("line.qc-now").count(), 1);
         const five = await curve.locator('path.qc-line[data-name="5 hours"]').getAttribute("d");
@@ -132,7 +133,9 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
           // several accounts: the next one is set apart from a curve's legend
           await card.locator(".quota-more").click();
           const second = card.locator(".subscription-account", { hasText: "b@x.com" });
-          assert.equal(await second.evaluate((e) => e.previousElementSibling.className), "quota-curve");
+          // (after the curve, a Codex account's Auto-use row, #719, then its
+          // Use credits row, which closes its section)
+          assert.deepEqual(await second.evaluate((e) => [e.previousElementSibling.previousElementSibling.previousElementSibling.className, e.previousElementSibling.previousElementSibling.className, e.previousElementSibling.className]), ["quota-curve", "quota-autoreset", "quota-credits on"]);
           assert.notEqual(await second.evaluate((e) => getComputedStyle(e).borderTopStyle), "none", "a rule between the accounts");
           const choose = async (name) => {
             await pick.click();
@@ -186,6 +189,9 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       // turned off in the window, the tray's line goes too, and stays gone
       const win = await panel.context().newPage();
       await win.route("**/*", serve(lang, "dark", false, data));
+      // a page of magpie's origin, only for its storage: served as a 404
+      // with no body, Chromium refused to open it (ERR_HTTP_RESPONSE_CODE_FAILURE)
+      await win.route("http://magpie.test/blank", (r) => r.fulfill({ contentType: "text/html", body: "<!doctype html><title>blank</title>" }));
       await win.goto("http://magpie.test/blank");
       await win.evaluate(() => localStorage.setItem("magpie.quotaRange", "off"));
       await panel.waitForFunction(() => !document.querySelector(".pq-spark"));

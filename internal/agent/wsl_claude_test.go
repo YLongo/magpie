@@ -13,6 +13,7 @@ import (
 	"github.com/yetone/magpie/internal/edit"
 	"github.com/yetone/magpie/internal/gateway"
 	"github.com/yetone/magpie/internal/provider"
+	"github.com/yetone/magpie/internal/testenv"
 )
 
 // claudeDistroHome is a distro's / in a temp dir with a user whose
@@ -44,7 +45,7 @@ func noOwnClaude(t *testing.T) {
 // The probe asks after Claude Code as after Codex and Pi, and reads what
 // it says.
 func TestWSLProbeFindsClaude(t *testing.T) {
-	for _, want := range []string{`[ -d "$HOME/.claude" ] && echo dir:.claude`, `p=$(command -v claude 2>/dev/null) && echo "bin:claude $p"`,
+	for _, want := range []string{`[ -d "$HOME/.claude" ] && echo dir:.claude`, `p=$(command -v claude 2>/dev/null || wslbin claude) && echo "bin:claude $p"`,
 		`[ -d "$HOME/.pi" ] && echo dir:.pi`, `[ -d "$HOME/.codex" ] && echo dir:.codex`} {
 		if !strings.Contains(wslProbeScript, want) {
 			t.Errorf("probe lacks %q:\n%s", want, wslProbeScript)
@@ -147,7 +148,7 @@ func TestWSLClaudePick(t *testing.T) {
 			gw = "http://172.20.0.1:" + gateway.Port()
 		}
 		env := func(k string) string { v, _ := edit.GetJSON(path, "env."+k); return v }
-		if env("ANTHROPIC_BASE_URL") != gw || env("ANTHROPIC_AUTH_TOKEN") != gateway.Token || env("ANTHROPIC_MODEL") != "relay/glm-4.6" ||
+		if env("ANTHROPIC_BASE_URL") != gw || env("ANTHROPIC_AUTH_TOKEN") != gateway.Token || env("ANTHROPIC_MODEL") != "" ||
 			env("ANTHROPIC_DEFAULT_HAIKU_MODEL") != "relay/glm-4.6" || env(claudeEffortEnv) != "max" {
 			t.Fatalf("mirrored %v:\n%s", mirrored, readFile(path))
 		}
@@ -332,9 +333,8 @@ func TestWSLClaudeNotFolded(t *testing.T) {
 	// this machine's Claude Code signed in, as its files say, with an inert
 	// claude first on PATH: the machine's own is never asked
 	bin := t.TempDir()
-	writeFile(t, filepath.Join(bin, "claude"), "#!/bin/sh\nexit 1\n")
+	testenv.Program(t, filepath.Join(bin, "claude"), "#!/bin/sh\nexit 1\n")
 	writeFile(t, filepath.Join(bin, "claude.cmd"), "@exit /b 1\r\n")
-	os.Chmod(filepath.Join(bin, "claude"), 0o755)
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
 	writeFile(t, filepath.Join(home, ".claude", ".credentials.json"), fmt.Sprintf(
 		`{"claudeAiOauth":{"accessToken":"tok","refreshToken":"r","expiresAt":%d,"subscriptionType":"max"}}`, time.Now().Add(time.Hour).UnixMilli()))

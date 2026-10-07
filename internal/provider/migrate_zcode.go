@@ -21,7 +21,7 @@ import (
 func init() {
 	movers["zcode"] = &mover{
 		pkg:    "@magpie-community/opencode-zcode-auth",
-		min:    "0.1.7", // a failure's status and its sign-in mark as the built-in's; MCP quota set aside as the built-in's
+		min:    "0.1.11", // a gift plan ZCode holds but hasn't granted is named on the card, to claim in the ZCode app (plugins #30, #1001); 0.1.10's gift-only buckets and 0.1.9's trial entries (plugins #21) kept
 		agents: []string{"zcode"},
 		// a Start Plan account was never served GLM-5.3, by the built-in
 		// or by ZCode, and the plugin lists it no more than they do; its

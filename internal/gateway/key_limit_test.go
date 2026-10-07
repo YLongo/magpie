@@ -15,6 +15,7 @@ import (
 	"github.com/yetone/magpie/internal/access"
 	"github.com/yetone/magpie/internal/budget"
 	"github.com/yetone/magpie/internal/provider"
+	"github.com/yetone/magpie/internal/settings"
 	"github.com/yetone/magpie/internal/usage"
 )
 
@@ -43,6 +44,18 @@ func setLimit(t *testing.T, id string, l *access.Limit) {
 	}
 }
 
+// pinLimitClock holds the gateway's limit checks at a fixed past noon, so
+// a test can't see its calls split across a midnight, a Monday or a 1st.
+// The calls are still recorded at the real time, later than that, and a
+// window counts every call from its start, so they all count in its window.
+func pinLimitClock(t *testing.T) time.Time {
+	t.Helper()
+	at := time.Date(2026, 9, 30, 12, 0, 0, 0, time.Local)
+	limitClock = func() time.Time { return at }
+	t.Cleanup(func() { limitClock = time.Now })
+	return at
+}
+
 // A key past its limit is refused before any provider is asked, with a
 // 429 that names the key, the limit and when it resets; another key and a
 // keyless request from this computer go on; what was used survives a
@@ -50,6 +63,7 @@ func setLimit(t *testing.T, id string, l *access.Limit) {
 func TestKeyLimitRefusesBeforeUpstream(t *testing.T) {
 	fresh(t)
 	budget.Forget()
+	now := pinLimitClock(t)
 	calls := limitedUpstream(t, 0)
 	keys, secrets := newCaller(t, "Capped", "Other")
 	setLimit(t, keys[0].ID, &access.Limit{Period: "day", Tokens: 700})
@@ -87,7 +101,9 @@ func TestKeyLimitRefusesBeforeUpstream(t *testing.T) {
 	if e.Error.Type != "rate_limit_error" || !strings.Contains(e.Error.Message, `"Capped"`) || !strings.Contains(e.Error.Message, "700 of its 700") || !strings.Contains(e.Error.Message, "resets at") {
 		t.Fatal("refusal says", w.Body.String())
 	}
-	if ra, _ := strconv.Atoi(w.Header().Get("Retry-After")); ra <= 0 || ra > 86400+3600 || w.Header().Get("X-Should-Retry") != "false" {
+	// it resets at the next midnight after the check
+	_, reset := access.Window("day", now)
+	if ra := w.Header().Get("Retry-After"); ra != strconv.Itoa(int(reset.Sub(now).Seconds())) || w.Header().Get("X-Magpie-Limit-Reset") != reset.Format(time.RFC3339) || w.Header().Get("X-Should-Retry") != "false" {
 		t.Fatal("headers", w.Header())
 	}
 	rec := lastUsage(t)
@@ -115,7 +131,7 @@ func TestKeyLimitRefusesBeforeUpstream(t *testing.T) {
 	if w := call(secrets[0], "/v1/chat/completions", chatReq); w.Code != 429 {
 		t.Fatal("a restart forgot what the key used", w.Code)
 	}
-	st := budget.Of(access.Key{ID: keys[0].ID, Limit: &access.Limit{Period: "day", Tokens: 700}}, time.Now())
+	st := budget.Of(access.Key{ID: keys[0].ID, Limit: &access.Limit{Period: "day", Tokens: 700}}, now)
 	if st == nil || st.Tokens != 700 || st.Calls != 2 || !st.Spent || st.TokensLeft != 0 {
 		t.Fatalf("status %+v", st)
 	}
@@ -138,7 +154,8 @@ func TestKeyLimitRefusesBeforeUpstream(t *testing.T) {
 		Limit   budget.Status
 	}
 	json.Unmarshal(lw.Body.Bytes(), &got)
-	if !got.Limited || got.Limit.Tokens != 1400 || got.Limit.TokensLeft != 3600 || got.Limit.Period != "week" {
+	monday, _ := access.Window("week", now)
+	if !got.Limited || got.Limit.Tokens != 1400 || got.Limit.TokensLeft != 3600 || got.Limit.Period != "week" || !got.Limit.Start.Equal(monday) {
 		t.Fatal("limit endpoint", lw.Body.String())
 	}
 }
@@ -149,6 +166,7 @@ func TestKeyLimitRefusesBeforeUpstream(t *testing.T) {
 func TestKeyLimitHoldsParallelRequests(t *testing.T) {
 	fresh(t)
 	budget.Forget()
+	now := pinLimitClock(t)
 	calls := limitedUpstream(t, 80*time.Millisecond)
 	keys, secrets := newCaller(t, "Busy")
 	setLimit(t, keys[0].ID, &access.Limit{Period: "month", Tokens: 2000})
@@ -178,7 +196,7 @@ func TestKeyLimitHoldsParallelRequests(t *testing.T) {
 		})
 	}
 	wg.Wait()
-	st := budget.Of(access.Key{ID: keys[0].ID, Limit: &access.Limit{Period: "month", Tokens: 2000}}, time.Now())
+	st := budget.Of(access.Key{ID: keys[0].ID, Limit: &access.Limit{Period: "month", Tokens: 2000}}, now)
 	if st.Tokens > 2000+350 || refused.Load() == 0 || ok.Load()+refused.Load() != 20 {
 		t.Fatalf("20 at once: %d let in, %d refused, %d tokens used of 2000, %d upstream calls", ok.Load(), refused.Load(), st.Tokens, calls.Load())
 	}
@@ -195,12 +213,13 @@ func TestKeyLimitHoldsParallelRequests(t *testing.T) {
 func TestKeyLimitWindowResets(t *testing.T) {
 	fresh(t)
 	budget.Forget()
+	now := pinLimitClock(t)
 	limitedUpstream(t, 0)
 	keys, secrets := newCaller(t, "Daily")
 	lim := &access.Limit{Period: "day", Tokens: 350}
 	setLimit(t, keys[0].ID, lim)
 	// yesterday's call
-	budget.Append(usage.Record{Time: time.Now().AddDate(0, 0, -1), Provider: "plan", Model: "m1", Input: 5000, Status: 200, CallerKeyID: keys[0].ID})
+	budget.Append(usage.Record{Time: now.AddDate(0, 0, -1), Provider: "plan", Model: "m1", Input: 5000, Status: 200, CallerKeyID: keys[0].ID})
 	h := New().Handler()
 	call := func() int {
 		r := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(chatReq))
@@ -216,13 +235,82 @@ func TestKeyLimitWindowResets(t *testing.T) {
 		t.Fatal("spent key let in")
 	}
 	who := access.Identity{KeyID: keys[0].ID, KeyName: "Daily", Limit: lim}
-	if _, refused := budget.Reserve(who, 10, "", time.Now()); refused == nil {
+	if _, refused := budget.Reserve(who, 10, "", now); refused == nil {
 		t.Fatal("spent today")
 	}
+	// the calls were recorded at the real time, so the next window that has
+	// none of them is the one after the real now
 	_, reset := access.Window("day", time.Now())
 	release, refused := budget.Reserve(who, 10, "", reset.Add(time.Minute))
 	if refused != nil {
 		t.Fatal("tomorrow's window still spent", refused)
 	}
 	release()
+}
+
+// An unfinished call belongs to the window it started in, including its
+// reservation. A late check or release of it cannot spend the new window.
+func TestKeyLimitReservationsStayInTheirWindow(t *testing.T) {
+	for _, period := range access.Periods {
+		for _, cap := range []struct {
+			name   string
+			tokens int64
+			cost   float64
+		}{{"tokens", 100, 0}, {"cost", 0, 1}} {
+			t.Run(period+"/"+cap.name, func(t *testing.T) {
+				fresh(t)
+				budget.Forget()
+				t.Cleanup(budget.Forget)
+				input, zero := 10_000.0, 0.0 // 100 input tokens reserve $1 with a cost cap.
+				if err := settings.Save(settings.Settings{ModelPrices: map[string]settings.ModelPrice{
+					"test/m": {Input: &input, Output: &zero, CacheRead: &zero, CacheWrite: &zero},
+				}}); err != nil {
+					t.Fatal(err)
+				}
+				lim := &access.Limit{Period: period, Tokens: cap.tokens, Cost: cap.cost}
+				who := access.Identity{KeyID: "key", KeyName: "Key", Limit: lim}
+				at := time.Date(2026, 10, 4, 12, 0, 0, 0, time.FixedZone("UTC+8", 8*3600))
+				_, after := access.Window(period, at)
+				before := after.Add(-time.Second)
+				reserve := func(at time.Time) func() {
+					t.Helper()
+					release, refused := budget.Reserve(who, 400, "test/m", at)
+					if refused != nil {
+						t.Fatal(refused)
+					}
+					t.Cleanup(release)
+					return release
+				}
+				checkHeld := func(at time.Time, n int) {
+					t.Helper()
+					st := budget.Of(access.Key{ID: who.KeyID, Limit: lim}, at)
+					if st.InFlight != n || st.Reserved != int64(n)*100 || st.ReservedCost != float64(n)*cap.cost || st.Tokens != 0 || st.Cost != 0 {
+						t.Errorf("at %s: want %d reservations and no settled usage, got %+v", at, n, st)
+					}
+				}
+				checkRefused := func(at time.Time) {
+					t.Helper()
+					if release, refused := budget.Reserve(who, 4, "test/m", at); refused == nil {
+						release()
+						t.Fatalf("at %s: let another call in while the window's budget was reserved", at)
+					}
+				}
+
+				old := reserve(before)
+				checkRefused(before)
+				checkHeld(after, 0) // status is right even before a new call arrives
+				current := reserve(after)
+				checkHeld(after, 1)
+				// A request timed before the boundary may acquire the lock last.
+				checkRefused(before)
+				budget.Append(usage.Record{Time: before, Provider: "test", Model: "m", Input: 100, Status: 200, CallerKeyID: who.KeyID})
+				old()
+				checkHeld(after, 1)
+				checkRefused(after)
+				current()
+				checkHeld(after, 0)
+				reserve(after)()
+			})
+		}
+	}
 }

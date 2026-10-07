@@ -26,7 +26,7 @@ func (h *host) watchTrayUsage() {
 	}
 	// a card read while stale is refreshed behind it: read it again once
 	// that lands, not a tick later, so the menu bar says what the panel does
-	provider.OnSubscriptionUsage = onTrayUsage
+	provider.OnSubscriptionUsage(onTrayUsage)
 	// Schedule native cell clicks on the application thread after startup.
 	onTrayCellClick = func(id string) {
 		h.whenReady(func() { application.InvokeAsync(func() { h.trayCellClick(id) }) })
@@ -81,7 +81,11 @@ func (h *host) watchTrayUsage() {
 			// Reapply even unchanged cells: a system menu-bar rebuild can
 			// replace the composed image with Wails' bird icon.
 			if len(cells) > 0 {
-				if trayImageShow(cells, trayIcon) {
+				bird := trayIcon
+				if s.TrayNoBird {
+					bird = nil // the cards alone
+				}
+				if trayImageShow(cells, bird) {
 					drawn = true
 				} else {
 					h.tray.SetLabel(label)

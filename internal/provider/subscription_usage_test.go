@@ -81,8 +81,13 @@ func TestSubscriptionUsageServesStale(t *testing.T) {
 	}
 	// what showed the stale copy hears when the new one lands
 	landed := make(chan struct{}, 1)
-	OnSubscriptionUsage = func() { landed <- struct{}{} }
-	t.Cleanup(func() { OnSubscriptionUsage = nil })
+	OnSubscriptionUsage(func() {
+		select {
+		case landed <- struct{}{}:
+		default:
+		}
+	})
+	t.Cleanup(func() { OnSubscriptionUsage(nil) })
 	c.Lock()
 	p := c.pending
 	c.at = time.Time{}
@@ -139,7 +144,7 @@ func TestCopilotQuotaWithoutEditorsSignIn(t *testing.T) {
 	if _, ok := copilotLogin(filepath.Join(home, ".config")); ok {
 		t.Fatal("the editors' own sign-in is still readable")
 	}
-	if err := addCopilotLogin("hubot", "Pro+", "ghu_hubot"); err != nil {
+	if err := addCopilotLogin("hubot", "Pro+", "ghu_hubot", ""); err != nil {
 		t.Fatal(err)
 	}
 	if ls := copilotLoginList(); len(ls) != 1 || ls[0].User != "hubot" {
@@ -159,7 +164,7 @@ func TestCopilotQuotaWithoutEditorsSignIn(t *testing.T) {
 	t.Cleanup(func() { CopilotUserURL = old })
 
 	var card *SubscriptionQuota
-	for _, q := range fetchSubscriptionUsage() {
+	for _, q := range fetchSubscriptionUsage(context.Background()) {
 		if q.Provider == "copilot" {
 			card = &q
 		}

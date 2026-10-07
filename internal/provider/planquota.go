@@ -291,6 +291,23 @@ func kimiCodeBase(base string) string {
 	return u
 }
 
+// KimiCodeSearch is where a Kimi Code plan's key searches the web, as
+// kimi-cli's SearchWeb does (auth/platforms.py: the plan's search_url is
+// its base_url, /coding/v1, with /search), "" for a provider that isn't a
+// Kimi Code plan with a key.
+func KimiCodeSearch(p Provider) string {
+	if p.Account != nil || p.Key == "" {
+		return ""
+	}
+	for _, base := range []string{p.Chat, p.Anthropic} {
+		h := hostOf(base)
+		if base != "" && ((h == "api.kimi.com" || h == "api.kimi.ai") && strings.Contains(base, "/coding") || strings.HasPrefix(p.Preset, "kimi-code")) {
+			return strings.TrimSuffix(kimiCodeBase(base), "/") + "/search"
+		}
+	}
+	return ""
+}
+
 // readKimiCode reads Kimi Code's /usages, as kimi-cli's /usage does:
 //
 //	{"usage":{"limit":"100","used":"12","resetTime":"2026-09-30T05:24:18.44Z"},
@@ -412,6 +429,19 @@ func planWindows(ctx context.Context, src planQuotaSource, key string) (plan str
 	return src.read(b)
 }
 
+// planKeyWindows asks the vendor for the plan key is on and its windows:
+// a Zhipu or Z.ai key with no plan of its own is a team's, whose windows
+// are asked with type=2 (zcode_team.go), and team says so.
+func planKeyWindows(ctx context.Context, p Provider, src planQuotaSource, key string) (plan string, ws []QuotaWindow, team bool, err error) {
+	plan, ws, err = planWindows(ctx, src, key)
+	if zhipu := strings.HasSuffix(src.url, "/api/monitor/usage/quota/limit"); zhipu && (err != nil || len(ws) == 0) {
+		if tplan, tws, terr := zhipuKeyTeamWindows(ctx, src.url, key, p.ZhipuTeam); terr == nil && len(tws) > 0 {
+			return tplan, tws, true, nil
+		}
+	}
+	return plan, ws, false, err
+}
+
 var planQuotaCache struct {
 	sync.Mutex
 	at   time.Time
@@ -423,12 +453,14 @@ var planQuotaCache struct {
 // than a minute ago is not asked again.
 func PlanQuotas(ctx context.Context) []SubscriptionQuota {
 	c := &planQuotaCache
+	_, again := refreshing(ctx) // one card read again (RefreshUsage)
 	c.Lock()
-	if c.data != nil && time.Since(c.at) < time.Minute {
+	if !again && c.data != nil && time.Since(c.at) < time.Minute {
 		defer c.Unlock()
 		return c.data
 	}
 	c.Unlock()
+	ctx, seq := quotaReading(ctx)
 	type job struct {
 		p    Provider
 		src  planQuotaSource
@@ -458,7 +490,9 @@ func PlanQuotas(ctx context.Context) []SubscriptionQuota {
 					user = Mask(k)
 				}
 			}
-			jobs = append(jobs, job{p, src, k, user})
+			if wantsCard(ctx, p.ID, user) {
+				jobs = append(jobs, job{p, src, k, user})
+			}
 		}
 	}
 	got := make([]*SubscriptionQuota, len(jobs))
@@ -468,15 +502,7 @@ func PlanQuotas(ctx context.Context) []SubscriptionQuota {
 		go func() {
 			defer wg.Done()
 			q := SubscriptionQuota{Provider: j.p.ID, Name: j.p.Name, Icon: j.p.Icon, User: j.user, Windows: []QuotaWindow{}}
-			plan, ws, err := planWindows(j.p.Via(ctx), j.src, j.key)
-			team := false
-			if zhipu := strings.HasSuffix(j.src.url, "/api/monitor/usage/quota/limit"); zhipu && (err != nil || len(ws) == 0) {
-				// no plan of the key's own: a team's key, whose windows are
-				// asked with type=2 (zcode_team.go)
-				if tplan, tws, terr := zhipuKeyTeamWindows(j.p.Via(ctx), j.src.url, j.key, j.p.ZhipuTeam); terr == nil && len(tws) > 0 {
-					plan, ws, err, team = tplan, tws, nil, true
-				}
-			}
+			plan, ws, team, err := planKeyWindows(j.p.Via(ctx), j.p, j.src, j.key)
 			// a vendor failing a while (Command Code answers billing/credits
 			// 503 at times) shows what was last read, as a subscription's
 			// card does, rather than no card or "Usage unavailable"
@@ -487,7 +513,7 @@ func PlanQuotas(ctx context.Context) []SubscriptionQuota {
 			case err != nil && !j.src.sure:
 				// no plan, unless one was read before
 				q.Error = err.Error()
-				if q = keepLast(q, tag); q.AsOf != nil {
+				if q = keepReading(ctx, q, tag); q.AsOf != nil {
 					got[i] = &q
 				}
 				return
@@ -495,11 +521,15 @@ func PlanQuotas(ctx context.Context) []SubscriptionQuota {
 				q.Error = err.Error()
 			default:
 				q.Plan, q.Windows = plan, ws
+				// what routing goes by, read just now (KeyAllowance)
+				k := j.p
+				k.Key = j.key
+				noteKeyAllowance(k, ws, time.Now())
 				if strings.HasSuffix(j.src.url, "/api/monitor/usage/quota/limit") && !team { // Zhipu, Z.ai
 					q.Until, q.Renew = zhipuTerm(ctx, zcodeRoot(j.src.url), j.key)
 				}
 			}
-			q = keepLast(q, tag)
+			q = keepReading(ctx, q, tag)
 			got[i] = &q
 		}()
 	}
@@ -507,8 +537,10 @@ func PlanQuotas(ctx context.Context) []SubscriptionQuota {
 	go func() { stepfun <- stepPlanQuotas(ctx) }()
 	wg.Wait()
 	out := []SubscriptionQuota{}
-	for _, q := range got {
+	for i, q := range got {
 		if q != nil {
+			// Set this after keepReading, which can restore a card from disk.
+			q.glmPlan = strings.HasSuffix(jobs[i].src.url, "/api/monitor/usage/quota/limit")
 			out = append(out, *q)
 		}
 	}
@@ -516,7 +548,10 @@ func PlanQuotas(ctx context.Context) []SubscriptionQuota {
 	if ctx.Err() == nil {
 		noteQuotaHistory(out, time.Now())
 		c.Lock()
-		c.at, c.data = time.Now(), out
+		c.data = cacheCards(c.data, out, seq, again)
+		if !again {
+			c.at, out = time.Now(), c.data
+		}
 		c.Unlock()
 	}
 	return out

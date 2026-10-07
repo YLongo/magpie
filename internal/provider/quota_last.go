@@ -69,6 +69,10 @@ func keepLast(q SubscriptionQuota, user string) SubscriptionQuota {
 	defer c.Unlock()
 	c.load()
 	if q.Error == "" {
+		if kept := c.m[key].Q; q.readSeq != 0 && kept.readSeq > q.readSeq {
+			kept.Name, kept.Icon, kept.User = q.Name, q.Icon, q.User
+			return kept
+		}
 		if len(q.Windows) == 0 && q.Balance == "" {
 			return q
 		}
@@ -129,7 +133,13 @@ func (c *lastQuotasT) load() {
 func (c *lastQuotasT) reading(key string) (SubscriptionQuota, bool) {
 	out, ok := c.reported(key)
 	if ok {
+		wasUp := usedUp(out)
 		out.Windows = elapsed(out.Windows, time.Now())
+		// a hold that came with a window used up ends when that window
+		// starts again; one with no window used up stands till a fresh read
+		if out.Held && wasUp && !usedUp(out) {
+			out.Held = false
+		}
 	}
 	return out, ok
 }
@@ -161,7 +171,7 @@ func (c *lastQuotasT) reported(key string) (SubscriptionQuota, bool) {
 // reading came back and put another first, taking conversations off the
 // account that had them cached (vincentzhang on Discord).
 func lastAllowances(agent string) map[string]Allowance {
-	logins, _, ok := usageLogins(agent)
+	logins, ok := usageLogins(agent)
 	if !ok {
 		return nil
 	}
@@ -174,7 +184,7 @@ func lastAllowances(agent string) map[string]Allowance {
 	for _, l := range logins {
 		q, ok := c.reading(loginProvider(l) + "/" + strings.ToLower(l.User))
 		if ok && len(q.Windows) > 0 {
-			out[l.User] = allowanceOf(q.Windows, now)
+			out[l.User] = allowanceOf(q.Windows, now).restartedBy(resetRunsOut(agent, l.User, q.Windows, q.Resets))
 		}
 	}
 	return out

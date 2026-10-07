@@ -8,6 +8,9 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/yetone/magpie/internal/testenv"
+	"github.com/yetone/magpie/internal/update"
 )
 
 // moveAndBack does what Move and MoveBack do with a mover's accounts, but
@@ -98,7 +101,7 @@ func TestMoveDevin(t *testing.T) {
 	os.MkdirAll(filepath.Join(data, "devin"), 0o700)
 	os.WriteFile(DevinCredentialsPath(), devinCredentials("key-own", "", "", ""), 0o600)
 	exe := filepath.Join(home, "devin")
-	os.WriteFile(exe, []byte("#!/bin/sh\n"+devinSigned+"\n"), 0o755)
+	testenv.Program(t, exe, "#!/bin/sh\n"+devinSigned+"\n")
 	fakeDevin(t, exe)
 	// the CLI's account is read by running it, which a loaded machine may
 	// take longer than a look's first wait for
@@ -228,6 +231,11 @@ func TestMoveCommandCode(t *testing.T) {
 	}
 	if l := cmdLogins(); len(l) != 3 {
 		t.Fatalf("cmd logins %+v", l)
+	}
+	// 0.1.7 and before said every model took no pictures (the list says
+	// nothing of them), which magpie takes over models.dev's answer
+	if update.Newer("0.1.8", movers[CommandCodePlanID].min) {
+		t.Fatalf("the move installs commandcode-auth %q, which marks every model text-only", movers[CommandCodePlanID].min)
 	}
 }
 

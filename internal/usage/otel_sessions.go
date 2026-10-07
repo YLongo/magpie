@@ -35,6 +35,20 @@ func OTelSession(agent, session string) bool {
 	return err == nil && e.sessionObserved(agent, session, config)
 }
 
+// OTelSessionFresh resolves a cached miss once before the gateway exports its
+// first attempt. Requests without a native ID retain observed-agent readiness.
+func OTelSessionFresh(agent, session string) bool {
+	if OTelSession(agent, session) {
+		return true
+	}
+	e := otel.Load()
+	if e == nil || session == "" {
+		return false
+	}
+	config, err := settings.OTelExport()
+	return err == nil && config.Enabled && config.Sessions && e.identities.VisibleFresh(agent, session)
+}
+
 func (e *otelExporter) sessionObserved(agent, session string, config settings.OTel) bool {
 	if !config.Enabled || !config.Sessions {
 		return false
@@ -77,7 +91,7 @@ func sessionRecord(s sessions.TraceSpan, config settings.OTel) Record {
 	}
 	typ := s.Kind
 	return Record{Agent: s.Agent, Model: s.Model, Served: s.Served, Provider: s.Provider, Time: s.Start, Millis: s.End.Sub(s.Start).Milliseconds(), Status: status,
-		Input: s.Tokens.Input, Output: s.Tokens.Output, CacheRead: s.Tokens.CacheRead, CacheWrite: s.Tokens.CacheWrite, Reasoning: s.Reasoning,
+		Input: s.Tokens.Input, Output: s.Tokens.Output, CacheRead: s.Tokens.CacheRead, CacheWrite: s.Tokens.CacheWrite, CacheWrite1h: s.Tokens.CacheWrite1h, Reasoning: s.Reasoning,
 		BodyIn: sessionBody(s.Input, config), BodyOut: sessionBody(s.Output, config),
 		OTel: &OTelSpan{TraceID: sessions.TraceID(s.Agent, s.Session, s.Turn), SpanID: s.ID, ParentID: s.Parent, Root: s.Parent == "", End: s.End,
 			Name: s.Name, Type: typ, SessionID: s.Session, TraceName: s.Agent + " interaction", Session: true, Inferred: s.Inferred, Update: s.Update}}

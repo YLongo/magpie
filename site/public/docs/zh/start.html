@@ -47,6 +47,7 @@
     <a href="/docs/zh/intent">意图路由</a>
     <a href="/docs/zh/plugins">插件开发</a>
     <a href="/docs/zh/import">Add to magpie</a>
+    <a href="/docs/zh/integrate">接入应用</a>
     <a href="https://github.com/yetone/magpie-releases/releases">版本发布</a>
   </div>
   <div class="langs">
@@ -143,6 +144,7 @@
       <tr><td>Claude Code</td><td><code>~/.claude/settings.json</code>：<code>env</code> 里的 <code>ANTHROPIC_BASE_URL</code>、<code>ANTHROPIC_AUTH_TOKEN</code> 和模型变量</td></tr>
       <tr><td>Codex</td><td><code>~/.codex/config.toml</code>：一个 <code>[model_providers.magpie]</code> 表和模型，模型列表写在 <code>magpie-models.json</code>。你的 ChatGPT 登录不受影响</td></tr>
       <tr><td>OpenCode、MiMo Code、Pi、Crush</td><td>一个 <code>magpie</code> 供应商条目，以及 <code>magpie/provider/model</code></td></tr>
+      <tr><td>AtomCode</td><td><code>~/.atomcode/config.toml</code>：一个 <code>magpie</code> 供应商账号，以及目录中每个模型各自的条目</td></tr>
       <tr><td>Gemini CLI</td><td><code>GOOGLE_GEMINI_BASE_URL</code> 指向网关、API 密钥认证，以及模型</td></tr>
     </table></div>
     <p><b>已在运行的会话保持它启动时的模型。</b>Agent 启动时读取配置，所以改动从下一个会话生效。Codex 也在启动时生成模型列表：切换后请重启 Codex 应用和已打开的 <code>codex</code> 会话。</p>
@@ -256,7 +258,18 @@ magpie claude group/opus-anywhere    <span class="c"># 使用它</span></pre>
     <p>已在运行的会话保持启动时的模型。开一个新会话；如果是 Codex，也请重启 Codex 应用。</p>
     <h3>手动改 Agent 的配置会冲突吗？</h3>
     <p>不会。magpie 每次都重新读取文件，只动它设置的那几个键，你的其他设置和注释都会保留。用 <span class="ui">导入…</span> 带进来的供应商是一份拷贝：之后在 Agent 里的改动不会再同步过来。</p>
+    <h3>没有梯子，安装或更新连不上 GitHub 怎么办？</h3>
+    <p>给安装脚本和 <code>magpie update</code> 加代理：<code>curl -fsSL https://usemagpie.ai/install.sh | sh -s -- --proxy http://127.0.0.1:7890</code>，或 <code>magpie update --proxy socks5://127.0.0.1:1080</code>（支持 http、https、socks5、socks5h；环境变量 <code>HTTPS_PROXY</code>、<code>ALL_PROXY</code> 同样生效）。<code>--mirror &lt;前缀&gt;</code> 从你指定的 GitHub 下载镜像取发布文件，即 <code>&lt;前缀&gt;https://github.com/…</code>；<code>magpie update mirror &lt;前缀&gt;</code> 让之后每次更新（包括应用自己的更新）都用它，<code>magpie update mirror off</code> 取消。不指定就不用任何镜像；文件的 SHA-256 始终来自 usemagpie.ai，而不是镜像，镜像改过的文件会被拒绝安装。应用自己的更新走 <span class="ui">设置</span> → <span class="ui">代理</span>。</p>
 
+    <h3 id="proxy-loopback">Agent 报 502 或连不上，magpie 的路由标签页里却什么都没有？</h3>
+    <p>代理软件（Surge、Clash、mihomo 等，开了系统代理、TUN 或增强模式）把 Agent 发往 <code>http://127.0.0.1:3425</code> 的请求接走、转去了别处，请求根本没到 magpie。只在跳过列表（<code>skip-proxy</code>、「绕过」）里写 127.0.0.1 不一定够：有些 Agent（比如 Codex）照样会走代理。在代理软件里加两条本地地址直连的规则，放在其他规则前面：</p>
+    <div class="code">
+      <span class="lang">Surge</span>
+      <button class="copy" data-copy="ex-loopback">复制</button>
+      <pre id="ex-loopback">IP-CIDR,127.0.0.0/8,DIRECT,no-resolve
+IP-CIDR6,::1/128,DIRECT,no-resolve</pre>
+    </div>
+    <p>Clash / mihomo 的配置里把这两行写在 <code>rules:</code> 下，每行前面加 <code>- </code>。改完让 Agent 重新发一次请求即可。</p>
     <p style="margin-top:48px">遇到问题，或者有值得分享的配置？来 <a href="https://discord.gg/vGSnD3ZKQF">Discord</a> 聊。想给自己的用户一键添加供应商的厂商，请看 <a href="/docs/zh/import">Add to magpie</a>。</p>
   </article>
 </main>
@@ -268,6 +281,7 @@ magpie claude group/opus-anywhere    <span class="c"># 使用它</span></pre>
     <a href="/docs/zh/intent">意图路由</a>
     <a href="/docs/zh/plugins">插件开发</a>
     <a href="/docs/zh/import">Add to magpie</a>
+    <a href="/docs/zh/integrate">接入应用</a>
     <a href="https://github.com/yetone/magpie">GitHub</a>
     <a href="https://discord.gg/vGSnD3ZKQF">Discord</a>
     <a href="https://github.com/yetone/magpie-releases/releases">版本发布</a>

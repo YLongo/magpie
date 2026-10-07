@@ -46,6 +46,9 @@ func libraryView(res *library.Result) (libraryJSON, error) {
 type marketJSON struct {
 	Items any    `json:"items"`
 	Error string `json:"error,omitempty"`
+	// Custom is a server to add by hand, for a search that is an address
+	// nothing listed is at
+	Custom *library.Custom `json:"custom,omitempty"`
 }
 
 func errText(err error) string {
@@ -104,7 +107,7 @@ func libraryRoutes(mux *http.ServeMux, w Windows) {
 	// once asked for, which skills.sh gives one at a time
 	mux.HandleFunc("GET /api/library/market/servers", func(rw http.ResponseWriter, r *http.Request) {
 		list, err := library.MarketServers(r.URL.Query().Get("q"))
-		writeJSON(rw, marketJSON{Items: list, Error: errText(err)})
+		writeJSON(rw, marketJSON{Items: list, Error: errText(err), Custom: library.CustomAt(r.URL.Query().Get("q"), list)})
 	})
 	mux.HandleFunc("GET /api/library/market/skills", func(rw http.ResponseWriter, r *http.Request) {
 		list, err := library.MarketSkills(r.URL.Query().Get("q"))
@@ -163,13 +166,14 @@ func libraryRoutes(mux *http.ServeMux, w Windows) {
 	// installing rtk when the page is asked to
 	mux.HandleFunc("GET /api/library/rtk", func(rw http.ResponseWriter, r *http.Request) {
 		v := library.ReadRTK()
-		// its latest release, when GitHub answers in time: the page is
-		// drawn without it otherwise, and has it next time
+		// its latest release, and whether winget or Homebrew has it yet,
+		// when they answer in time: the page is drawn without them
+		// otherwise, and has them next time
 		if v.Path != "" {
-			latest := make(chan string, 1)
-			go func() { latest <- library.RTKLatest() }()
+			checked := make(chan *library.RTKView, 1)
+			go func() { c := *v; c.CheckLatest(); checked <- &c }()
 			select {
-			case v.Latest = <-latest:
+			case v = <-checked:
 			case <-time.After(3 * time.Second):
 			}
 		}
@@ -303,6 +307,24 @@ func libraryRoutes(mux *http.ServeMux, w Windows) {
 		}
 		writeJSON(rw, v)
 	})
+	// whether the servers work, by connecting to them: those named, or every
+	// one; a server checked this session as it is now is answered from then
+	mux.HandleFunc("POST /api/library/mcp/check", func(rw http.ResponseWriter, r *http.Request) {
+		var in struct {
+			Names []string
+			Fresh bool
+		}
+		if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+			fail(rw, err)
+			return
+		}
+		m, err := library.CheckServers(r.Context(), in.Names, in.Fresh)
+		if err != nil {
+			fail(rw, err)
+			return
+		}
+		writeJSON(rw, map[string]any{"servers": m})
+	})
 	// every change answers with the page as it is after it, and what it did
 	mux.HandleFunc("POST /api/library/{what}/{action}", func(rw http.ResponseWriter, r *http.Request) {
 		var in struct {
@@ -322,6 +344,7 @@ func libraryRoutes(mux *http.ServeMux, w Windows) {
 			Copy   bool              // a project gets copies, not links
 			Keep   bool              // a project removed keeps what magpie put in it
 			On     bool              // every skill or server given to the agents, or taken from them
+			How    string            // link or copy: how skills are given to Agent, or to every agent with none (#896)
 			library.InstructionsChange
 		}
 		if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
@@ -343,8 +366,12 @@ func libraryRoutes(mux *http.ServeMux, w Windows) {
 			res, err = library.ServerAgents(in.Name, in.Agents)
 		case "servers/agents-all":
 			res, err = library.EveryServerAgents(in.Agents, in.On)
+		case "servers/agents-some":
+			res, err = library.SomeServersAgents(in.Names, in.Agents, in.On)
 		case "servers/remove":
 			res, err = library.RemoveServer(in.Name)
+		case "servers/remove-all":
+			res, err = library.RemoveServers(in.Names)
 		case "servers/import":
 			res, err = library.ImportServer(in.Name)
 		case "skills/install":
@@ -359,16 +386,28 @@ func libraryRoutes(mux *http.ServeMux, w Windows) {
 			res, err = library.SkillAgents(in.Name, in.Agents)
 		case "skills/agents-all":
 			res, err = library.EverySkillAgents(in.Agents, in.On)
+		case "skills/agents-some":
+			res, err = library.SomeSkillsAgents(in.Names, in.Agents, in.On)
 		case "skills/remove":
 			res, err = library.RemoveSkill(in.Name)
 		case "skills/remove-all":
 			res, err = library.RemoveSkills(in.Names)
+		case "skills/group":
+			res, err = library.GroupSkills(in.Old, in.Name, in.Names)
+		case "skills/ungroup":
+			res, err = library.UngroupSkills(in.Name, in.Names)
+		case "skills/add-new":
+			res, err = library.AddNewSkills(in.Names)
+		case "skills/ignore-new":
+			err = library.IgnoreNewSkills(in.Names)
 		case "skills/import":
 			res, err = library.ImportSkill(in.Name)
 		case "skills/import-all":
 			res, err = library.ImportSkills(in.Names)
 		case "skills/use-library":
 			res, err = library.UseLibrarySkill(in.Name, in.Agent)
+		case "skills/how":
+			res, err = library.SetSkillHow(in.Agent, in.How)
 		case "skills/keep-own":
 			res, err = library.KeepAgentSkill(in.Name, in.Agent)
 		case "market/server":

@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/yetone/magpie/internal/catalog"
 	"github.com/yetone/magpie/internal/provider"
 	"github.com/yetone/magpie/internal/settings"
 )
@@ -20,6 +21,9 @@ func TestSearcherChosen(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
 	setHome(t, t.TempDir()) // no signed-in agent searches
+	// no models.dev catalog either: the lists' models go by their ids
+	catalog.Reset()
+	t.Cleanup(catalog.Reset)
 	lists := func(ids ...string) string {
 		var b strings.Builder
 		for i, id := range ids {
@@ -94,6 +98,15 @@ func TestSearcherChosen(t *testing.T) {
 	if rs := RelaysSaidToSearch(); len(rs) != 1 || rs[0].ID != "relay" {
 		t.Errorf("relays = %v", rs)
 	}
+	if err := provider.SetModelName("ant/claude-haiku-4-5", "Named Haiku"); err != nil {
+		t.Fatal(err)
+	}
+	if got := AutoSearcher(); got != "Anthropic · Named Haiku" {
+		t.Errorf("auto = %q", got)
+	}
+	if err := provider.SetModelName("ant/claude-haiku-4-5", ""); err != nil {
+		t.Fatal(err)
+	}
 
 	// a provider, with its small model
 	choose("oai")
@@ -104,6 +117,18 @@ func TestSearcherChosen(t *testing.T) {
 	// a provider and a model of it
 	choose("oai/gpt-5.5")
 	want("oai", "gpt-5.5", "")
+	if err := provider.SetModelName("oai/gpt-5.5", "GPT Five Five"); err != nil {
+		t.Fatal(err)
+	}
+	if got := Searcher(); got != "OpenAI · GPT Five Five" {
+		t.Errorf("Searcher() = %q", got)
+	}
+	if err := provider.SetModelName("oai/gpt-5.5", ""); err != nil {
+		t.Fatal(err)
+	}
+	if got := Searcher(); got != "OpenAI · gpt-5.5" {
+		t.Errorf("Searcher() = %q", got)
+	}
 	// a model it no longer lists: its small model
 	choose("oai/gpt-4")
 	want("oai", "gpt-5-mini", "")

@@ -1,6 +1,6 @@
 package plugin
 
-// Bun kept up to date, as the plugins are: every few hours magpie asks
+// Bun kept up to date, as the plugins are: every six hours magpie asks
 // GitHub for Bun's newest release and, once it has been out two days (a
 // release with a bad bug is usually followed by a fix within them),
 // downloads it, checks its checksum, tries it and switches the plugin
@@ -46,7 +46,12 @@ func bunRoot() string { return filepath.Join(filepath.Dir(catalog.CachePath()), 
 
 func bunDirOf(v string) string { return filepath.Join(bunRoot(), v) }
 
-func bunExeOf(v string) string { return filepath.Join(bunDirOf(v), bunExe()) }
+// bunExeOf is where magpie keeps Bun v: named magpie-bun, so a proxy app's
+// PROCESS-NAME rule can tell the requests plugins make (and their installs)
+// from any other Bun's (#1048).
+func bunExeOf(v string) string { return filepath.Join(bunDirOf(v), magpieBun()) }
+
+func magpieBun() string { return "magpie-" + bunExe() }
 
 func bunStatePath() string { return filepath.Join(bunRoot(), "state.json") }
 
@@ -70,7 +75,13 @@ func writeBunState(s bunState) error {
 }
 
 func haveBun(v string) bool {
-	_, err := os.Stat(bunExeOf(v))
+	exe := bunExeOf(v)
+	if _, err := os.Stat(exe); err == nil {
+		return true
+	}
+	// a Bun downloaded before it was named magpie-bun takes the name
+	_ = os.Rename(filepath.Join(bunDirOf(v), bunExe()), exe)
+	_, err := os.Stat(exe)
 	return err == nil
 }
 
@@ -275,7 +286,7 @@ func pruneBuns(s bunState) {
 }
 
 // KeepBunUpdated looks for a newer Bun a little after magpie starts, then
-// every updateEvery, while there are plugins to run on it.
+// every bunEvery, while there are plugins to run on it.
 func KeepBunUpdated(ctx context.Context) {
 	t := time.NewTimer(2 * time.Minute)
 	defer t.Stop()
@@ -292,6 +303,6 @@ func KeepBunUpdated(ctx context.Context) {
 			}
 			cancel()
 		}
-		t.Reset(updateEvery)
+		t.Reset(bunEvery)
 	}
 }

@@ -16,6 +16,9 @@ func TestCopilotEntitlementLabels(t *testing.T) {
 		{"individual", "unknown-sku", "Pro"},
 		{"individual", "free_limited_copilot", "Free"},
 		{"individual_pro", "", "Pro+"}, {"business", "", "Business"},
+		// the real Max account's (copilot_usage_test.go), not "Individual_max"
+		{"individual_max", "free_github_star_quota", "Max"},
+		{"individual_edu", "", "Education"},
 		{"enterprise", "", "Enterprise"}, {"free", "", "Free"},
 		{"", "free_limited_copilot", "Free"}, {"", "unknown-sku", ""},
 		{"future_plan", "future-sku", "Future_plan"}, {"", "", ""},
@@ -29,7 +32,7 @@ func TestCopilotEntitlementLabels(t *testing.T) {
 
 func TestCopilotEntitlementRefresh(t *testing.T) {
 	signIn(t)
-	if err := addCopilotLogin("hubot", "Pro", "gho_hubot"); err != nil {
+	if err := addCopilotLogin("hubot", "Pro", "gho_hubot", ""); err != nil {
 		t.Fatal(err)
 	}
 	copilotLoginList() // remember the editor's own account
@@ -56,11 +59,11 @@ func TestCopilotEntitlementRefresh(t *testing.T) {
 
 func TestCopilotReplacementClearsSKU(t *testing.T) {
 	signIn(t)
-	if err := addCopilotLogin("hubot", "Education", "old"); err != nil {
+	if err := addCopilotLogin("hubot", "Education", "old", ""); err != nil {
 		t.Fatal(err)
 	}
 	refreshCopilotEntitlement(copilotApp{User: "hubot", Token: "old"}, "Education", "free_educational_quota")
-	if err := addCopilotLogin("hubot", "Pro", "new"); err != nil {
+	if err := addCopilotLogin("hubot", "Pro", "new", ""); err != nil {
 		t.Fatal(err)
 	}
 	for _, l := range readLogins() {
@@ -84,7 +87,7 @@ func TestCopilotOwnEntitlementSwitch(t *testing.T) {
 
 func TestCopilotEducationQuotaRefresh(t *testing.T) {
 	signIn(t)
-	if err := addCopilotLogin("hubot", "Pro", "gho_hubot"); err != nil {
+	if err := addCopilotLogin("hubot", "Pro", "gho_hubot", ""); err != nil {
 		t.Fatal(err)
 	}
 	fail := false
