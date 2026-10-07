@@ -1776,6 +1776,7 @@
       if (all.length) body.append(skillHowBar());
       if (picking) body.append(pickBar(all));
     }
+    if (lib.skills.length || lib.projects.length) renderProjects(body, "skills");
     if (lib.newSkills?.length) renderNewSkills(body);
     if (lib.foundSkills.length) {
       const rh = el("div", "row-head");
@@ -1798,7 +1799,6 @@
       for (const f of lib.foundSkills) list.append(foundSkillRow(f));
       body.append(list);
     }
-    if (lib.skills.length || lib.projects.length) renderProjects(body, "skills");
     const skip = shownAgents().filter((a) => !a.skills);
     if (skip.length) body.append(el("p", "lib-aside", t("{agents} has no skills folder.", { agents: skip.map((a) => a.name).join(", ") })));
     // Desktop reads its skills list again only when its window is reloaded (#638)
@@ -3004,7 +3004,9 @@
     ready();
     bar.append(el("span", "grow"), button(t("Cancel"), "", closeLibModal), go);
     ed.append(bar);
-    modal = { save: () => go.click() };
+    // ticks and filter typing are choices made on the way, not edits to
+    // save: closing asks nothing (the picker's rows dirty it otherwise)
+    modal = { save: () => go.click(), dirty: () => false };
     openLib(ed);
   }
 
