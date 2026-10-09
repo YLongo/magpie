@@ -2643,21 +2643,38 @@
     const a = addingProject;
     const card = el("div", "list lib-card lib-install");
     const line = el("div", "lib-find");
-    const st = { dir: "", busy: false };
     const inp = el("input");
     inp.type = "text";
+    inp.dataset.lib = "project";
     inp.placeholder = t("The project's folder, like ~/code/app");
     inp.spellcheck = false;
     inp.autocomplete = "off";
-    inp.oninput = () => { st.dir = inp.value; };
-    const err = el("div", "lib-err");
+    inp.value = a.dir;
+    inp.oninput = () => { a.dir = inp.value; };
+    inp.onkeydown = (e) => { e.stopPropagation(); if (e.key === "Enter") add(); else if (e.key === "Escape") { addingProject = null; render(); } };
+    line.append(glyph(GLYPH.folder, "lib-mini"), inp);
+    // the app has the system's folder picker; a browser tab only the path
+    if (!web) {
+      line.append(button(t("Choose…"), "", async () => {
+        try {
+          const r = await api("library/projects/choose", {});
+          if (r.dir) { a.dir = r.dir; a.error = ""; render(); }
+        } catch (e) { status(e.message, "err", 6000); }
+      }));
+    }
+    const go = button(a.busy ? t("Adding…") : t("Add"), "action", () => add());
+    go.disabled = !!a.busy;
+    line.append(go, button(t("Cancel"), "", () => { addingProject = null; render(); }));
+    card.append(line);
+    if (a.error) card.append(el("div", "lib-err", a.error));
     async function add() {
-      const dir = st.dir.trim();
-      if (!dir || st.busy) return;
-      st.busy = true;
+      const dir = a.dir.trim();
+      if (!dir || a.busy) return;
+      a.busy = true;
+      render();
+      const was = new Set(lib.projects.map((x) => x.dir));
       try {
         take(await api("library/projects/add", { dir }));
-
         addingProject = null;
         const p = lib.projects.find((x) => !was.has(x.dir));
         if (p) openProjects.add(p.dir);
