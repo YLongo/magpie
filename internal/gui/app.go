@@ -19,6 +19,7 @@ import (
 	"github.com/wailsapp/wails/v3/pkg/application"
 	"github.com/wailsapp/wails/v3/pkg/events"
 
+	"github.com/yetone/magpie/internal/agent"
 	"github.com/yetone/magpie/internal/appdir"
 	"github.com/yetone/magpie/internal/autostart"
 	"github.com/yetone/magpie/internal/library"
@@ -337,8 +338,17 @@ func Run(version string, showMain bool, link string) error {
 		// way out, so the next launch is the new one.
 		// Quitting doesn't come back to main on a Mac (NSApp terminate:
 		// exits), so the CLIs still being asked something end here.
+		// Account failover magpie wrote into Codex goes with the gateway
+		// this process serves: Codex left pointed at it would retry till
+		// magpie is open again (Leon920717 on X). The next start writes it
+		// again (Sync).
 		OnShutdown: func() {
 			proc.EndProbes()
+			if served.Load() != nil {
+				if err := agent.EndCodexFailover(); err != nil {
+					log.Println("codex failover:", err)
+				}
+			}
 			updates.install(false)
 		},
 		// Wails exits on some webview errors; say why before it does.
@@ -361,10 +371,12 @@ func Run(version string, showMain bool, link string) error {
 
 	onDock = func(s settings.Settings) { h.dock(s, h.MainShown()) }
 	dockOnFullscreen()
-	// The Dock icon opens the window. Wails would show every hidden window
-	// on it, the panel too, so the hook answers first and stops it.
+	watchHide()
+	// The Dock icon opens the window, or goes to it where it is open. Wails
+	// would show every hidden window on it, the panel too, so the hook
+	// answers first and stops it.
 	h.app.Event.RegisterApplicationEventHook(events.Mac.ApplicationShouldHandleReopen, func(e *application.ApplicationEvent) {
-		h.ShowMain("")
+		application.InvokeSync(h.reopenMain)
 		e.Cancel()
 	})
 
@@ -461,6 +473,9 @@ func Run(version string, showMain bool, link string) error {
 		if cmdClick() {
 			return // Command-drag moves the icon; the system handles it
 		}
+		if runtime.GOOS == "linux" && menuOpening() {
+			return // a right-click opening the menu, not a click (#1430)
+		}
 		if runtime.GOOS == "darwin" {
 			go h.flap()
 		}
@@ -481,6 +496,7 @@ func Run(version string, showMain bool, link string) error {
 		h.app.Event.OnApplicationEvent(events.Common.ApplicationStarted, func(*application.ApplicationEvent) {
 			plainTitlebar(h.main) // Linux: the page's header is the title bar
 			nameWindow(h.panel, panelTitle)
+			ownFrame(h.panel) // KDE: no title bar of KWin's on it (#1283)
 			markReady()
 		})
 	}
@@ -511,6 +527,9 @@ func Run(version string, showMain bool, link string) error {
 			h.Import(u)
 		}
 	})
+	// GTK 3 with no font DPI set would lay every page out at a negative
+	// width (#1371); give it one before the first webview is made.
+	fontDPI()
 	return h.app.Run()
 }
 
