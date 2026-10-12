@@ -1638,7 +1638,7 @@ const I18N = {
     "Use one…": "用一张…",
     "Use a reset": "用一张重置卡",
     "Its week was used up, so one of {account}'s Codex resets was used by itself first.": "本周额度已用完，已先自动使用 {account} 的一张 Codex 重置卡。",
-  "{who} answered {status}: its week is used up and nobody else could take the request, so one of {account}'s Codex resets was used by itself and the request is asked again, before any of the reply reaches {agent}.": "{who} 返回 {status}：本周额度已用完且无其他账号可接手，已自动使用 {account} 的一张 Codex 重置卡并重发请求，{agent} 尚未收到任何回复。",
+    "{who} answered {status}: its week is used up and nobody else could take the request, so one of {account}'s Codex resets was used by itself and the request is asked again, before any of the reply reaches {agent}.": "{who} 返回 {status}：本周额度已用完且无其他账号可接手，已自动使用 {account} 的一张 Codex 重置卡并重发请求，{agent} 尚未收到任何回复。",
     "{who} no longer uses a reset by itself": "{who} 不再自动使用重置卡",
     "Auto-use resets": "自动使用重置卡",
     "Auto-use resets:": "自动使用重置卡：",
