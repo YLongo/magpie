@@ -198,6 +198,15 @@ type Provider struct {
 	// DeepSeek's own keeps its prompt cache. See ClinePin.
 	PinUpstream bool `json:"pinUpstream,omitempty"`
 
+	// AuthHeader is which header the key goes in on a third-party
+	// Anthropic API, which is sent both x-api-key and Authorization:
+	// Bearer by default (AuthBoth). A vendor that refuses the two together
+	// (Aloha on Discord: "x-api-key 和 Authorization 不可以同时存在") is
+	// sent one, AuthXAPIKey or AuthBearer: picked in the editor, or
+	// learned from that refusal (RetryOneAuth). Anthropic's, Bedrock's and
+	// Azure's own APIs, which take x-api-key alone, ignore it.
+	AuthHeader string `json:"authHeader,omitempty"`
+
 	// Unredacted has requests to a provider on this machine or the local
 	// network (Ollama, LM Studio, a vLLM box) go as the agent wrote them,
 	// unmasked by Settings' redaction, which keeps secrets from vendors
@@ -684,10 +693,18 @@ func Save(p Provider) error {
 			p.Was = was.Was
 		}
 		f.Providers[i] = p
-		return store(f)
+	} else {
+		f.Providers = append(f.Providers, p)
 	}
-	f.Providers = append(f.Providers, p)
-	return store(f)
+	if err := store(f); err != nil {
+		return err
+	}
+	if p.ID == "claude" {
+		// an account's proxy picked in the editor reaches Claude Code at
+		// once, not at the gateway's next look (#1807)
+		syncClaudeProxyEnvNow()
+	}
+	return nil
 }
 
 // listedWith is what p.PickedFrom is saved as: none without picks; what was
@@ -1043,11 +1060,19 @@ func normalize(p Provider) Provider {
 			p.Decide = pr.Decide
 		}
 	}
+	// an oMLX provider saved before its preset had System One (#1641)
+	// asks it where its chat completions are, at whatever port it was given
+	if p.Preset == OMLXPreset && p.Decide == "" && p.Chat != "" {
+		p.Decide = p.Chat
+	}
 	if p.Routing != Ordered && p.Routing != Rotate && p.Routing != LeastUsed && p.Routing != Pace && p.Routing != Weighted {
 		p.Routing = ""
 	}
 	if !slices.Contains(Affinities, p.Affinity) {
 		p.Affinity = ""
+	}
+	if !slices.Contains(AuthChoices, p.AuthHeader) {
+		p.AuthHeader = AuthBoth
 	}
 	if p.MaxConcurrency != nil && *p.MaxConcurrency < 0 {
 		p.MaxConcurrency = new(int)

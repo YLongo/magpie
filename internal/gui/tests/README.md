@@ -1173,6 +1173,17 @@ zoom level), where the buttons' edge measures a hair past the header's
 padding; WebKit, which has no page zoom to set, uses the device scale factor.
 English and Chinese, with `/api/plugins` faked.
 
+`header-relang.test.cjs` opens a macOS window in Chinese at 830px, with the
+header's tabs picked over the sidebar, and switches it from Settings to
+English, Traditional Chinese, Japanese, German and back (kiwiflysky on X).
+In English it is handed a wide font (Menlo, as the host hands a saved font)
+on the Agents page, swept from 1000 to 640px: each width is fitted to the
+system font first and, given Menlo, must match a fresh fit. Each language is
+then swept from 1100 to 600px, and the tabs keep 7.5px from the magpie (or
+the header's padding past the traffic lights) and from the buttons, which
+stay in the header; drawn in all the way, they scroll in the room between.
+Chromium and WebKit, with `/api/settings` faked.
+
 `strip-scrollbar.test.cjs` lays out an overflowing tab strip (`segs regions`,
 the Sessions page's agents and a provider's regions) in Chromium with its
 scrollbars shown (ARNO on Discord): off a Mac it scrolls under the app's
@@ -1491,6 +1502,12 @@ left-border accent. Finish sign-in stays off until something is typed, then
 posts the address to the sign-in's callback route once, and the account is
 named in the status line. Nothing scrolls. The checks run in English and
 Chinese, in Chromium and WebKit.
+
+`signin-port-blocked.test.cjs` checks a ChatGPT sign-in whose port 1455
+couldn't be opened (#1782): the box says why, Windows reserving the port or
+another program holding it, with the port named, in place of the
+server-or-Docker guess, and the pasted address finishes the sign-in. Every
+language, Chromium and WebKit, 900 and 420 wide.
 
 `signin-paste-key.test.cjs` checks Command Code signed in to from a browser
 that can't reach magpie (on a server, in Docker), where Command Code's page

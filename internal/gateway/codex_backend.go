@@ -97,7 +97,7 @@ func (s *Server) codexBackend(w http.ResponseWriter, r *http.Request) {
 			// the request on the model asked for when it can't be, the
 			// trace saying why (codexUpstreamOn, serve)
 			if !strings.Contains(model, "/") {
-				pick := codexSubagentPick(r, agentOf(r), requestCallKind(r.Header, requestSessionMetadata(r.Header, body)), model)
+				pick := codexSubagentPick(r, agentOf(r), requestCallKind(r.Header, requestSessionMetadata(r.Header, body)), model, body)
 				r = withSubagentPick(r, pick)
 				if pick.Moved() {
 					body, model = withModel(body, pick.To), pick.To
@@ -372,11 +372,11 @@ func leadFirst(scope, parent string, cands []candidate, pl planned) ([]candidate
 // fields (including ordinary model history) keep their existing handling.
 func hasSealedAgentMessage(body []byte) bool {
 	var request map[string]json.RawMessage
-	if json.Unmarshal(body, &request) != nil {
+	if decodeJSON(body, &request) != nil {
 		return false
 	}
 	var items []json.RawMessage
-	if json.Unmarshal(request["input"], &items) != nil {
+	if decodeJSON(request["input"], &items) != nil {
 		return false
 	}
 	for _, raw := range items {
@@ -384,7 +384,7 @@ func hasSealedAgentMessage(body []byte) bool {
 			Type    string            `json:"type"`
 			Content []json.RawMessage `json:"content"`
 		}
-		if json.Unmarshal(raw, &item) != nil || item.Type != "agent_message" {
+		if decodeJSON(raw, &item) != nil || item.Type != "agent_message" {
 			continue
 		}
 		for _, content := range item.Content {
@@ -392,7 +392,7 @@ func hasSealedAgentMessage(body []byte) bool {
 				Type             string `json:"type"`
 				EncryptedContent string `json:"encrypted_content"`
 			}
-			if json.Unmarshal(content, &part) == nil && part.Type == "encrypted_content" && nativeSealedAgentPayload.MatchString(part.EncryptedContent) {
+			if decodeJSON(content, &part) == nil && part.Type == "encrypted_content" && nativeSealedAgentPayload.MatchString(part.EncryptedContent) {
 				return true
 			}
 		}
@@ -538,8 +538,15 @@ func compactOn(r *http.Request, model string) *provider.Provider {
 		return nil
 	}
 	others := p.AlsoOn()
+	// one whose sign-in its vendor revoked is the last asked (#1793)
+	revoked := func(o provider.Provider) bool { return provider.SignInMarked(o.Account) }
 	for i, o := range others {
-		if !resting(candidate{p: o, model: model, rest: o.ID}) {
+		if !resting(candidate{p: o, model: model, rest: o.ID}) && !revoked(o) {
+			return &others[i]
+		}
+	}
+	for i, o := range others {
+		if !revoked(o) {
 			return &others[i]
 		}
 	}
@@ -698,6 +705,7 @@ func (s *Server) codexUpstreamOn(w http.ResponseWriter, r *http.Request, rest st
 	autoReset := false // a Codex reset looked at, once
 	resetNote := ""    // what spending it did, for the request log
 	resets := 0        // times a large request ChatGPT closed on was asked again (#1628)
+	sent := len(body)  // the bytes that went, compressed (provider.CodexCompressed)
 	for tries := 0; ; tries++ {
 		ctx := provider.ViaSignedIn(r.Context(), "codex")
 		if on != nil {
@@ -720,6 +728,12 @@ func (s *Server) codexUpstreamOn(w http.ResponseWriter, r *http.Request, rest st
 				end(502, msg, 0, 0)
 				return
 			}
+			// a sign-in its vendor revoked isn't sent again (#1793)
+			if why, ok := provider.RevokedSignIn(on.Account, req); ok {
+				writeError(w, provider.Responses, 401, why)
+				end(401, why, 0, 0)
+				return
+			}
 			req.Header.Del("Accept")
 			for _, v := range accept {
 				req.Header.Add("Accept", v)
@@ -727,6 +741,9 @@ func (s *Server) codexUpstreamOn(w http.ResponseWriter, r *http.Request, rest st
 		}
 		// left to the transport, the reply comes back plain for the usage in it
 		req.Header.Del("Accept-Encoding")
+		// a turn to ChatGPT goes zstd-compressed again, as Codex sent it
+		// before magpie read it (ylorn on X); an API key's goes plain
+		sent = provider.CodexCompressed(req, body)
 		if res, err = s.client.Do(req); err != nil {
 			msg := "OpenAI: " + err.Error()
 			if rest == "/responses" {
@@ -735,6 +752,11 @@ func (s *Server) codexUpstreamOn(w http.ResponseWriter, r *http.Request, rest st
 			writeError(w, provider.Responses, 502, msg)
 			end(502, msg, 0, 0)
 			return
+		}
+		if on != nil {
+			// one of magpie's accounts: a revoked sign-in shows on its
+			// row, to sign in again (#1793)
+			noteSignIn(ctx, on.Account, req, res)
 		}
 		if !autoReset && rest == "/responses" && base != codexAPIBase && res.StatusCode == http.StatusTooManyRequests {
 			// the account is out of its allowance: one it lets spend its
@@ -752,7 +774,7 @@ func (s *Server) codexUpstreamOn(w http.ResponseWriter, r *http.Request, rest st
 				}
 			}
 		}
-		if rest == "/responses" && base != codexAPIBase && res.StatusCode == http.StatusServiceUnavailable && len(body) >= codexDropBody && resets < lastRetries {
+		if rest == "/responses" && base != codexAPIBase && res.StatusCode == http.StatusServiceUnavailable && sent >= codexDropBody && resets < lastRetries {
 			// ChatGPT closed the connection before answering a large
 			// request, which often passes (#1628): asked again after a
 			// moment, as the accounts loop asks its last one again
@@ -792,7 +814,7 @@ func (s *Server) codexUpstreamOn(w http.ResponseWriter, r *http.Request, rest st
 		if base != codexAPIBase {
 			// still closed on after that: Codex is told what may help,
 			// at the 503 it asks again for (#1628)
-			res = codexDropped(res, len(body))
+			res = codexDropped(res, sent)
 		}
 	}
 	defer res.Body.Close()

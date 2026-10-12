@@ -6,9 +6,9 @@ import (
 	"debug/buildinfo"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -305,9 +305,10 @@ func (a *Agent) Detected() bool {
 // started before Claude Code's installer put claude.exe in ~/.local/bin
 // and added that to the user's PATH, or a self-update restarting with the
 // PATH it had then, never listed it, while the sign-in, which asked
-// FindTool, found it (#839, #1482). "" when it is in none.
+// FindTool, found it (#839, #1482). A mise wrapper script found there is
+// given as the program it runs (proc.LookPath). "" when it is in none.
 func binAt(name string) string {
-	if p, err := exec.LookPath(name); err == nil {
+	if p, err := proc.LookPath(name); err == nil {
 		return p
 	}
 	if runtime.GOOS == "windows" {
@@ -414,6 +415,35 @@ func (a *Agent) Values() map[string]string {
 		m[f.Key] = f.Get()
 	}
 	return m
+}
+
+// Picks are the options f's picker offers: all of them, unless the user
+// asked a's pickers to offer magpie's models alone (#1642, MizuIro-H). Then
+// a field that picks among magpie's catalog leaves out the models the agent
+// reaches on its own (DeepSeek Harness's DeepSeek ones), but for its
+// default and the one it is set to.
+func (a *Agent) Picks(f Field, cur map[string]string) []Option {
+	opts := f.Options(cur)
+	if !provider.OwnModelsHidden(a.ListsFor()) || !slices.ContainsFunc(opts, func(o Option) bool { return o.Ref != "" }) {
+		return opts
+	}
+	return slices.DeleteFunc(slices.Clone(opts), func(o Option) bool { return Own(o) && o.Value != cur[f.Key] })
+}
+
+// Own reports whether o is a model the agent reaches on its own, not one of
+// magpie's catalog: what Picks leaves out on the user's word.
+func Own(o Option) bool { return o.Ref == "" && o.Value != "" }
+
+// OwnModels reports whether one of a's pickers that picks among magpie's
+// catalog offers models of the agent's own too, which Picks can leave out.
+func (a *Agent) OwnModels(cur map[string]string) bool {
+	for _, f := range a.Fields {
+		opts := f.Options(cur)
+		if slices.ContainsFunc(opts, func(o Option) bool { return o.Ref != "" }) && slices.ContainsFunc(opts, Own) {
+			return true
+		}
+	}
+	return false
 }
 
 // Detected returns the agents present on this machine, in display order.

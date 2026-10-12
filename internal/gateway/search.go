@@ -66,8 +66,9 @@ type CallFor struct {
 	// model that described is the one magpie picks in its place
 	// (VisionMissing), and the Routing view names both.
 	Missing string `json:"missing,omitempty"`
-	// MCP, on a web search, is that the agent called magpie's web search
-	// MCP server (SearchMCPPath) itself, for no model of magpie's.
+	// MCP, on a web search or an image's description, is that the agent
+	// called magpie's MCP server (SearchMCPPath, VisionMCPPath) itself, for
+	// no model of magpie's.
 	MCP bool `json:"mcp,omitempty"`
 }
 
@@ -313,7 +314,7 @@ func chosenSearcher() (*provider.Provider, string, string) {
 	if m := searcherModel(p); m != "" {
 		return &p, m, ""
 	}
-	if ms := p.Available(); len(ms) > 0 {
+	if ms := p.Exposed(); len(ms) > 0 {
 		return &p, ms[0].ID, ""
 	}
 	return &p, "", SearcherNoneOf
@@ -378,10 +379,13 @@ func RelaysSaidToSearch() []provider.Provider {
 
 // smallModel is the provider's cheapest small model of a vendor that
 // searches well, or its cheapest, or its first; only among those keep
-// holds, when it is given.
+// holds, when it is given. Only a model the user enabled is picked (what
+// agents are offered, Exposed), never one of the rest of the vendor's
+// list: OpenRouter turned away an unpicked anthropic/claude-haiku-5.5 for
+// the user's region (JonahFu on X).
 func smallModel(p provider.Provider, keep func(catalog.Model) bool) string {
 	var ms []catalog.Model
-	for _, m := range p.Available() {
+	for _, m := range p.Exposed() {
 		if keep != nil && !keep(m) {
 			continue
 		}
