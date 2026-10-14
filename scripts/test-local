@@ -1,26 +1,44 @@
 #!/bin/sh
-# Full test suite as this machine can run it. The stock `make test` trips on
-# two environment guards upstream's CI never sees:
+# Local test runner. The stock `make test` trips on two environment guards
+# upstream's CI never sees (skips documented in docs/agents/upstream-sync.md):
 #   - TestGitPlugin: the local git-guard hook blocks `git push` from agents,
 #     and its fixture pushes to a temp-dir bare repo to fake GitHub
 #   - TestLANModelListNotThroughProxy: the machine's TUN-mode proxy
 #     (fake-IP utun) resets LAN sockets the test needs
-# Skips are documented in docs/agents/upstream-sync.md; they are environment,
-# not regressions. UI subset: library/project surfaces, one engine, ~25s —
-# run after merges that touch internal/gui/assets (needs playwright via
-# NODE_PATH, see upstream-sync.md).
+#
+#   test-local          go suite (with skips) + i18n check        — the default
+#   test-local go       go vet + go suite only
+#   test-local ui       UI subset only: library surfaces, one engine, ~25s
+#                       (chromium: webkit's pick-skills fails at upstream HEAD
+#                       itself; needs playwright via NODE_PATH, see sync doc)
+#   test-local check    i18n check only (both tables + cross-file)
+#   test-local all      everything, in order
 set -e
 cd "$(dirname "$0")/.."
-go vet ./...
-go test -tags nogui -skip 'TestGitPlugin|TestLANModelListNotThroughProxy' ./... 2>&1 | grep -vE "^ok|no test files" || true
-echo "go tests green (2 env skips)"
-if [ -n "$UI" ]; then
-  NODE_PATH="$HOME/lib/playwright/node_modules" node --test --test-concurrency=4 \
+cmd="${1:-default}"
+
+go_suite() {
+  go vet ./...
+  go test -tags nogui -skip 'TestGitPlugin|TestLANModelListNotThroughProxy' ./... 2>&1 | grep -vE "^ok|no test files" || true
+  echo "go tests green (2 env skips)"
+}
+
+ui_subset() {
+  BROWSER="${BROWSER:-chromium}" NODE_PATH="$HOME/lib/playwright/node_modules" \
+    node --test --test-concurrency=4 \
     internal/gui/tests/library-items.test.cjs \
     internal/gui/tests/pick-skills.test.cjs \
     internal/gui/tests/project-remove-keep.test.cjs \
     internal/gui/tests/project-servers.test.cjs \
     internal/gui/tests/skill-groups.test.cjs \
     internal/gui/tests/skill-new-in-repo.test.cjs
-fi
-node scripts/check-i18n.cjs
+}
+
+case "$cmd" in
+  go) go_suite ;;
+  ui) ui_subset ;;
+  check) node scripts/check-i18n.cjs ;;
+  all) go_suite; ui_subset; node scripts/check-i18n.cjs ;;
+  default) go_suite; node scripts/check-i18n.cjs ;;
+  *) echo "usage: $0 [go|ui|check|all]" >&2; exit 2 ;;
+esac
