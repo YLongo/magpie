@@ -232,7 +232,10 @@ func callSources() []file {
 	out = append(out, dshCallFiles()...)
 	out = append(out, minimaxCallFiles()...)
 	out = append(out, kimiCallFiles()...)
+	out = append(out, wslFiles("kimi")...)
+	out = append(out, piCallFiles()...)
 	out = append(out, codebuddyCallFiles()...)
+	out = append(out, agyCallFiles()...) // #2097
 	return append(out, workbuddyCallFiles()...)
 }
 

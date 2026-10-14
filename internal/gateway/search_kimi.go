@@ -85,16 +85,16 @@ func (s *Server) ownSearch(ctx context.Context, p provider.Provider, query strin
 	}
 	ctx, cancel := context.WithTimeout(context.WithValue(ctx, searchingKey{}, true), searchTimeout)
 	defer cancel()
-	return s.searchWith(ctx, p, searcherModel(p), query)
+	return s.searchWith(ctx, p, searcherModel(p), query, "")
 }
 
 // searchBy searches with one searcher: a Kimi Code plan by its search
 // service, any other by its model.
-func (s *Server) searchBy(ctx context.Context, p provider.Provider, model, query string) (string, []Hit, error) {
+func (s *Server) searchBy(ctx context.Context, p provider.Provider, model, query, effort string) (string, []Hit, error) {
 	if provider.KimiCodeSearch(p) != "" {
 		return s.kimiSearch(ctx, p, query)
 	}
-	return s.searchWith(ctx, p, model, query)
+	return s.searchWith(ctx, p, model, query, effort)
 }
 
 // kimiSearch asks a Kimi Code plan's search service.
@@ -103,7 +103,7 @@ func (s *Server) kimiSearch(ctx context.Context, p provider.Provider, query stri
 	// through the plan's own proxy, if it has one (#237, #1522)
 	ctx, cancel := context.WithTimeout(s.metered(p.Via(ctx), p, ""), searchTimeout/2)
 	defer cancel()
-	body, _ := json.Marshal(map[string]any{"text_query": query, "limit": searchHits, "enable_page_crawling": false, "timeout_seconds": 30})
+	body, _ := json.Marshal(map[string]any{"text_query": maskedQuery(query, &p), "limit": searchHits, "enable_page_crawling": false, "timeout_seconds": 30})
 	r, err := http.NewRequestWithContext(ctx, http.MethodPost, provider.KimiCodeSearch(p), bytes.NewReader(body))
 	if err != nil {
 		return "", nil, err

@@ -47,6 +47,11 @@ func init() {
 var others = []*Agent{
 	{ID: "magpie", Name: "magpie", Icon: "magpie", UA: []string{"magpie"}},
 	{ID: "curl", Name: "curl", Icon: "curl", UA: []string{"curl"}},
+	// PI-Desktop (vastsa/PI-Desktop) runs Pi's own library, which says
+	// "pi (…)"; given a User-Agent of its own in its provider's settings
+	// ("pi-desktop/0.1.0"), it is told apart from Pi by that name, which
+	// Pi's "pi-" would take otherwise (#1966, dgmico)
+	{ID: "pi-desktop", Name: "PI-Desktop", Icon: "pi", UA: []string{"pi-desktop"}},
 }
 
 // Clients is everyone whose requests the gateway knows by name: every
@@ -989,6 +994,8 @@ func piLikeKeyed(at place, id, name, dir string, key func() string) *Agent {
 	// the user's two files as they were before magpie's first write, put
 	// back byte for byte by Disconnect where it leaves them saying the same
 	before := beforeMagpie{at.key(id + ".before.absent"), []string{path, modelsPath}}
+	// the entries of enabledModels a sync took out (scope_gone.go)
+	gone := at.key(id + ".scope.gone")
 	return &Agent{
 		ID: id, Name: name, Icon: id, Bin: id, Dir: dir, Path: path, Spelled: prefixed,
 		Restore: before.restore,
@@ -1000,7 +1007,23 @@ func piLikeKeyed(at place, id, name, dir string, key func() string) *Agent {
 				"baseUrl", at.v1(), "apiKey", key())
 		},
 		Sync: func() error {
-			return syncJSON(modelsPath, "providers."+magpieID, block)
+			if err := syncJSON(modelsPath, "providers."+magpieID, block); err != nil {
+				return err
+			}
+			// an entry on a model magpie no longer gives Pi names nothing
+			// (#2055, scope_gone.go)
+			return piScopeSynced(path, modelsPath, gone)
+		},
+		// a provider renamed takes its magpie/<id>/ entries in enabledModels
+		// with it: an entry left on the old id names nothing, and Pi would
+		// leave that model out of Ctrl+P (#1919, #1828)
+		RenameRefs: func(from, to string) (bool, error) {
+			scopeGoneRename(gone, from, to)
+			next, ok := renameRefList(piScope(path), from, to)
+			if !ok {
+				return false, nil
+			}
+			return true, edit.SetJSON(path, edit.KV{Path: "enabledModels", Value: next})
 		},
 		Fields: []Field{
 			{
@@ -1015,6 +1038,7 @@ func piLikeKeyed(at place, id, name, dir string, key func() string) *Agent {
 						if err := edit.DelJSON(modelsPath, "providers."+magpieID); err != nil {
 							return err
 						}
+						forget(gone)
 						return piScopeWithout(path)
 					}
 					if ref, ok := strings.CutPrefix(v, magpieID+"/"); ok && isMagpie(ref) {
@@ -1102,7 +1126,7 @@ func gooseIn(at place, cfg string) *Agent {
 		keyEnv = func(string) string { return "" }
 	}
 	return &Agent{
-		ID: "goose", Name: "Goose", Icon: "goose", Bin: "goose", Dir: filepath.Dir(path), Path: path, Spelled: prefixed,
+		ID: "goose", Name: "Goose", Icon: "goose", Bin: "goose", Dir: filepath.Dir(path), Path: path, Spelled: prefixed, NoNames: true,
 		UA: []string{"goose"},
 		Check: func() string {
 			if p, _ := gooseActive(path); p != gooseProviderID {

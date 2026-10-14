@@ -10,11 +10,13 @@ package gateway
 
 import (
 	"context"
+	"net/http"
 	"slices"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/yetone/magpie/internal/access"
 	"github.com/yetone/magpie/internal/provider"
 	"github.com/yetone/magpie/internal/usage"
 )
@@ -24,6 +26,10 @@ const traceKeep = 60
 
 // Route is one request's way through routing.
 type Route struct {
+	// callerKey: the gateway key the request came with, so a key held to
+	// a budget, models or accounts is told the routes of its own requests
+	// alone (sessionLatest, #1981)
+	callerKey     string
 	imageTurn     string
 	imageCaller   string
 	imageProvider string
@@ -46,6 +52,7 @@ type Route struct {
 	For           *CallFor     `json:"for,omitempty"`           // the request it was made for, as Call's
 	Model         string       `json:"model"`                   // as the agent asked
 	Effort        string       `json:"effort,omitempty"`        // the reasoning the agent asked for; "" for none
+	Tier          string       `json:"tier,omitempty"`          // the service tier the agent asked for (bodyTier); "" for none
 	Provider      string       `json:"provider"`                // the provider the model resolved to
 	Group         *GroupRef    `json:"group,omitempty"`         // the routing group the agent asked for
 	Rule          *RuleHit     `json:"rule,omitempty"`          // the group's rules for it, when it has any
@@ -95,6 +102,10 @@ type Route struct {
 	// Conv: the conversation a request without a session id is part of,
 	// as a digest of its first user turn (conversationID)
 	Conv string `json:"conv,omitempty"`
+	// Folder: the last two levels of the folder its agent says it works
+	// in (shortFolder), never the whole path; a request that says none
+	// takes its session's, as said last (#1068)
+	Folder string `json:"folder,omitempty"`
 }
 
 // RouteUsage is one billable attempt's pricing inputs, kept in routing history.
@@ -287,10 +298,15 @@ type Try struct {
 	// Upstream: the provider an aggregator said answered behind it
 	// (OpenRouter's DeepInfra, Novita …)
 	Upstream string `json:"upstream,omitempty"`
-	Fail     string `json:"fail,omitempty"` // why it failed, as rest tells it
-	Error    string `json:"error,omitempty"`
-	Rest     *Rest  `json:"rest,omitempty"`  // how long it now sits out; none when it was the last to try
-	Again    int64  `json:"again,omitempty"` // ms waited before it was tried again, the last one left
+	// Tier: the service tier it went out at, once a fast pick or an
+	// account without Ultrafast had changed it; TierServed: the one its
+	// reply said it ran at, when it said one (#1784)
+	Tier       string `json:"tier,omitempty"`
+	TierServed string `json:"tierServed,omitempty"`
+	Fail       string `json:"fail,omitempty"` // why it failed, as rest tells it
+	Error      string `json:"error,omitempty"`
+	Rest       *Rest  `json:"rest,omitempty"`  // how long it now sits out; none when it was the last to try
+	Again      int64  `json:"again,omitempty"` // ms waited before it was tried again, the last one left
 	// Replan: every member had failed in a way that passes, so after
 	// Again the Replan of them that may answer by then were asked again,
 	// in turn, within the group's Patience (seconds) for the request
@@ -313,11 +329,14 @@ type Try struct {
 	Auto []provider.AutoPick `json:"auto,omitempty"`
 }
 
-// AutoReset is a Codex or Claude reset spent by itself, on Who's account.
+// AutoReset is a Codex reset spent by itself, on Who's account. (Claude's
+// resets were taken out in 9bf6d4352 and aren't coming back: reading or
+// spending one means magpie calling Anthropic with the account's token,
+// #1972.)
 type AutoReset struct {
 	Who   string `json:"who"`
 	Text  string `json:"text"`
-	Agent string `json:"agent,omitempty"` // "claude" for a Claude account's; Codex's otherwise
+	Agent string `json:"agent,omitempty"` // the account's agent, as Account.Agent has it
 }
 
 type planned struct {
@@ -395,6 +414,14 @@ type trace struct {
 	bodies []keptBody
 	// turns follows agents' turns, to say when one is done (TurnDone)
 	turns turns
+	// folders: each session's folder, as its requests said it last, for
+	// the requests that don't say it (a title, a topic check)
+	folders map[string]sessionFolder
+}
+
+type sessionFolder struct {
+	folder string
+	at     time.Time
 }
 
 // Totals count the requests routed since the gateway started.
@@ -419,9 +446,25 @@ func (t *trace) changed() {
 	}
 }
 
+// beginFor begins req's route, marked with the gateway key req came with.
+// Every route of a request begins here, so a held key's own routes are
+// told it: one begun without (begin alone) is told to no held key.
+func (t *trace) beginFor(req *http.Request, r Route) *Route {
+	r.callerKey = access.Caller(req.Context()).KeyID
+	return t.begin(r)
+}
+
 func (t *trace) begin(r Route) *Route {
+	// the body is read for its folder before the lock: a long one takes
+	// a while, and every route waits on the lock
+	if r.dirOf != nil {
+		dir := r.dirOf()
+		r.dirOf = func() string { return dir }
+		r.Folder = shortFolder(dir)
+	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	t.sessionFolder(&r, time.Now())
 	if t.ids == 0 {
 		// ids go on from one run to the next, the history keeping them
 		// all: counted on from the time the gateway began
@@ -439,6 +482,63 @@ func (t *trace) begin(r Route) *Route {
 	t.changed()
 	rp.Seq = t.seq
 	return rp
+}
+
+// foldersKeep is how many sessions' folders are kept, the oldest said
+// going first when there are more.
+const foldersKeep = 512
+
+// sessionFolder gives r its session's folder when it says none, and keeps
+// the one it says for those that come after: an agent's requests on the
+// side, a title or a topic check, have no full system prompt to say it.
+// A request with no session id has only its own (#1068).
+func (t *trace) sessionFolder(r *Route, now time.Time) {
+	key := func(s string) string {
+		if s == "" {
+			return ""
+		}
+		return r.Agent + "\x00" + s
+	}
+	own, parent := key(r.Session), key(r.ParentSession)
+	if r.Folder == "" {
+		for _, k := range []string{own, parent} {
+			if f, ok := t.folders[k]; ok && k != "" {
+				r.Folder = f.folder
+				return
+			}
+		}
+		return
+	}
+	if own == "" {
+		return
+	}
+	if t.folders == nil {
+		t.folders = map[string]sessionFolder{}
+	}
+	t.folders[own] = sessionFolder{r.Folder, now}
+	for len(t.folders) > foldersKeep {
+		oldest := ""
+		for k, f := range t.folders {
+			if oldest == "" || f.at.Before(t.folders[oldest].at) {
+				oldest = k
+			}
+		}
+		delete(t.folders, oldest)
+	}
+}
+
+// shortFolder is the last two levels of dir, "/"-joined: enough to tell
+// one project from another, without the rest of the path (#1068). A
+// Windows drive is no level; "" for none.
+func shortFolder(dir string) string {
+	parts := strings.FieldsFunc(strings.TrimSpace(dir), func(c rune) bool { return c == '/' || c == '\\' })
+	if len(parts) > 0 && len(parts[0]) == 2 && parts[0][1] == ':' {
+		parts = parts[1:]
+	}
+	if len(parts) > 2 {
+		parts = parts[len(parts)-2:]
+	}
+	return strings.Join(parts, "/")
 }
 
 // trim keeps traceKeep routes, the oldest finished ones going first: a
@@ -538,10 +638,18 @@ func swapped(sent, served string) bool { return usage.Swapped(sent, served) }
 
 // routeUsage retains only what pricing needs, without another copy of the
 // request's metadata. Unknown token counts have no price, including failures.
+// What the reply counted of earlier requests (Deferred) is priced as a tier
+// of its own before the request's, which stays last: the prompt is read
+// from the last (promptCounted), and is the request's own.
 func routeUsage(id, model string, u Usage) []RouteUsage {
-	if u.Input+u.Output == 0 {
-		return nil
+	var out []RouteUsage
+	if d := u.Deferred; d != nil && d.Input+d.Output+d.CacheRead+d.CacheWrite > 0 {
+		out = append(out, RouteUsage{Provider: id, Model: model, Input: d.Input, Output: d.Output,
+			CacheRead: d.CacheRead, CacheWrite: d.CacheWrite, Reasoning: d.Reasoning})
 	}
-	return []RouteUsage{{Provider: id, Model: model, Input: u.Input, Output: u.Output,
-		CacheRead: u.CacheRead, CacheWrite: u.CacheWrite, Reasoning: u.Reasoning}}
+	if u.Input+u.Output == 0 {
+		return out
+	}
+	return append(out, RouteUsage{Provider: id, Model: model, Input: u.Input, Output: u.Output,
+		CacheRead: u.CacheRead, CacheWrite: u.CacheWrite, Reasoning: u.Reasoning})
 }
