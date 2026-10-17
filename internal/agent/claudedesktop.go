@@ -43,6 +43,7 @@ import (
 	"github.com/yetone/magpie/internal/desktopdir"
 	"github.com/yetone/magpie/internal/edit"
 	"github.com/yetone/magpie/internal/gateway"
+	"github.com/yetone/magpie/internal/provider"
 )
 
 // desktopProfileID is magpie's profile in Desktop's configLibrary: a
@@ -169,7 +170,7 @@ func claudeDesktop(home string) *Agent {
 				return []Option{{Value: magpieID, Label: "magpie", Icon: "magpie",
 					Note: "Desktop's third-party gateway: Code and Cowork on magpie's models, no Anthropic sign-in (restart Desktop)"}}
 			},
-		}}, desktopTierFields(ps)...),
+		}}, append(desktopTierFields(ps), desktopSubagentField(ps), desktopSubagentEffortField(ps))...),
 	}
 }
 
@@ -237,6 +238,70 @@ func desktopTierFields(ps []desktopPaths) []Field {
 		})
 	}
 	return fields
+}
+
+// desktopSubagentField picks the model every subagent turn in Desktop's
+// Code tab and Cowork runs on, whatever its lead or tier asked for. It
+// writes nothing to Desktop's config, which has no key for it, and the
+// Claude Code it runs ignores CLAUDE_CODE_SUBAGENT_MODEL in ~/.claude
+// while Desktop manages its provider: it is magpie's setting
+// (settings.DesktopSubagentModel), which the gateway reads on each
+// request (gateway desktopSubagentPick), so it is Live and a change needs
+// no restart of Desktop. Labelled as Codex's "subagent model", it gets the
+// same square on the Agents page. A Desktop alias picked is kept by its
+// catalog id.
+func desktopSubagentField(ps []desktopPaths) Field {
+	return Field{
+		Key: "subagent_model", Label: "subagent model", Quiet: true, Live: true,
+		Get: provider.DesktopSubagentModel,
+		Set: func(v string) error {
+			return provider.SetDesktopSubagentModel(gateway.DesktopCatalogID(v))
+		},
+		Options: func(map[string]string) []Option {
+			if !desktopWiredAny(ps) {
+				return nil
+			}
+			return viaMagpie("claude-desktop", "")
+		},
+	}
+}
+
+// Desktop's subagent effort is a live gateway setting, like its subagent
+// model. With no model picked, a subagent may use any of Desktop's models,
+// so all levels are offered and the gateway fits each to the actual model.
+func desktopSubagentEffortField(ps []desktopPaths) Field {
+	return Field{
+		Key: "subagent_effort", Label: "subagent effort", Quiet: true, Live: true,
+		Get: provider.DesktopSubagentEffort,
+		Set: provider.SetDesktopSubagentEffort,
+		Options: func(map[string]string) []Option {
+			if !desktopWiredAny(ps) {
+				return nil
+			}
+			target := provider.DesktopSubagentModel()
+			if target == "" {
+				return static(provider.MemberEfforts...)
+			}
+			for _, e := range provider.Served() {
+				if e.ID != target {
+					continue
+				}
+				if provider.Reasonless(e.Provider.ID, e.Model) {
+					return nil
+				}
+				var levels []string
+				for _, level := range e.Efforts {
+					if slices.Contains(provider.MemberEfforts, level) {
+						levels = append(levels, level)
+					}
+				}
+				if len(levels) > 0 {
+					return static(levels...)
+				}
+			}
+			return static(provider.MemberEfforts...)
+		},
+	}
 }
 
 // desktopWired: _meta.json lists magpie's profile.

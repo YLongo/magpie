@@ -186,18 +186,17 @@ func trayUsageCards(ctx context.Context, ids []string) []provider.SubscriptionQu
 	}
 	var currency string
 	var rate float64
+	var noCost bool
 	for _, id := range ids {
 		p, ok := trayTotalPeriod(id)
 		if !ok {
 			continue
 		}
 		if currency == "" {
-			currency = settings.Load().Currency
-			if currency == "cny" {
-				rate = fx.Soon().CNYPerUSD // never waited for, as the Settings page's
-			}
+			currency, rate = trayCurrency()
+			noCost = settings.Load().TrayNoCost
 		}
-		cards = append(cards, trayTotalCard(id, trayTotalSum(p), currency, rate))
+		cards = append(cards, trayTotalCard(id, trayMoney(trayTotalSum(p), noCost), currency, rate))
 	}
 	return trayPick(cards, ids, time.Now())
 }
@@ -220,22 +219,26 @@ func trayTotalPeriod(id string) (usage.Period, bool) {
 	return usage.Period(p), true
 }
 
-// trayTotalSum is a period's sum as the Usage page's Overview has it (its
-// cached summary, without the sessions); a var for tests.
-var trayTotalSum = func(p usage.Period) usage.Totals { return usage.SummarizeTop(p, 0).Totals }
+// trayTotalSum is a period's sum as the Usage page's Requests tab and the
+// panel's Usage tab have it, the pages a click on it opens: the gateway's
+// requests and the calls the agents' session files record beside them,
+// from the ledger's cached index; a var for tests. The Overview's summary,
+// summed before, left those calls out (NextCommit on Discord).
+var trayTotalSum = func(p usage.Period) usage.Totals { return usage.QueryPage(p, usage.Filter{}, 0, 1).Sum }
 
-// trayTotalCard is a total as a card: its rows are the tokens in and out
-// (cache aside, as the Usage page counts them) over the cost, in the
-// currency Settings says, "+" when some calls had no known price; nothing
-// beneath the tokens when none had one. Its name is the tooltip, which
-// spells them out.
+// trayTotalCard is a total as a card: its rows are every token, the
+// cache's too, as the Requests tab's and the panel's Tokens count them,
+// marked Σ so it doesn't read as the input alone (NextCommit on Discord),
+// over the cost, in the currency Settings says, "+" when some calls had no
+// known price; nothing beneath the tokens when none had one. Its name is
+// the tooltip, which spells out the input, output and cache.
 func trayTotalCard(id string, t usage.Totals, currency string, rate float64) provider.SubscriptionQuota {
 	when := "Today"
 	if p, _ := trayTotalPeriod(id); p == usage.Week {
 		when = "Last 7 days"
 	}
-	rows := []string{trayCount(t.Tokens())}
-	tip := when + " in magpie\n" + trayCount(t.Tokens()) + " tokens (" + trayCount(t.Input) + " in · " + trayCount(t.Output) + " out)"
+	rows := []string{"Σ" + trayCount(t.Tokens()+t.CacheRead+t.CacheWrite)}
+	tip := when + " in magpie\n" + trayTokens(t)
 	if t.Cost > 0 {
 		c := usage.FormatCost(t.Cost, currency, rate)
 		if t.Unpriced > 0 {
@@ -249,6 +252,60 @@ func trayTotalCard(id string, t usage.Totals, currency string, rate float64) pro
 		tip += fmt.Sprintf(", %d with no known price", t.Unpriced)
 	}
 	return provider.SubscriptionQuota{Provider: id, Name: tip, Balance: strings.Join(rows, " · ")}
+}
+
+// trayMoney is a total as the menu bar says it: with its cost, or with no
+// cost and no count of calls with no known price when Settings › Menu bar
+// cost is off (settings.TrayNoCost, BussanQ on Discord), the tokens alone.
+func trayMoney(t usage.Totals, noCost bool) usage.Totals {
+	if noCost {
+		t.Cost, t.Unpriced = 0, 0
+	}
+	return t
+}
+
+// trayCurrency is the currency Settings shows costs in, and the yuan's
+// rate when that is CNY.
+func trayCurrency() (currency string, rate float64) {
+	currency = settings.Load().Currency
+	if currency == "cny" {
+		rate = fx.Soon().CNYPerUSD // never waited for, as the Settings page's
+	}
+	return currency, rate
+}
+
+// trayTokens is a total's every token, the cache's too, with what they
+// were: "6.3M tokens (912K in · 318K out · 5.1M cached)".
+func trayTokens(t usage.Totals) string {
+	s := trayCount(t.Tokens()+t.CacheRead+t.CacheWrite) + " tokens (" + trayCount(t.Input) + " in · " + trayCount(t.Output) + " out"
+	if cached := t.CacheRead + t.CacheWrite; cached > 0 {
+		s += " · " + trayCount(cached) + " cached"
+	}
+	return s + ")"
+}
+
+// trayIdleTip is the tooltip while the menu bar shows no cards: magpie's
+// name over what went through it today, as the panel's Usage tab counts it
+// (ylorn on Discord: a Linux bar's tooltip said only "magpie"): every
+// token, split into input, output and cache as the usage:today card's
+// tooltip does (NextCommit on Discord), then the cost and the requests.
+func trayIdleTip(t usage.Totals, currency string, rate float64) string {
+	if t.Calls == 0 {
+		return "magpie\nToday: no requests yet"
+	}
+	line := "Today: " + trayTokens(t) + "\n"
+	if t.Cost > 0 {
+		c := usage.FormatCost(t.Cost, currency, rate)
+		if t.Unpriced > 0 {
+			c += "+"
+		}
+		line += "≈" + c + " · "
+	}
+	n := "requests"
+	if t.Calls == 1 {
+		n = "request"
+	}
+	return fmt.Sprintf("magpie\n%s%d %s", line, t.Calls, n)
 }
 
 // trayCount is a count as the Usage page says it in English: 133M, 1.2M,

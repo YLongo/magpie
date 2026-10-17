@@ -83,7 +83,7 @@ const usage = `magpie — one place to pick every agent's model
   magpie visible [<agent> <family|provider|group>,… | all | --only-picked | --show-new]
                                   which models an agent is shown: families (magpie provider/group set <id> family=…),
                                   or only the models ticked for it, a new one off until it is ticked
-  magpie search [add <api> <key>|rm <api>]   Tavily, Brave, Exa, Firecrawl, You.com or SearXNG for web search when no provider can search
+  magpie search [add <api> <key>|rm <api>]   Tavily, Brave, Exa, Firecrawl, You.com, DeepSeek or SearXNG for web search when no provider can search
   magpie groups                   routing groups: several models agents pick as one, group/<id>
   magpie group add <name> models=<m1>,<m2> [routing=smart|order|rotate|usage|pace] [stays=auto|session|turn|off]
   magpie group <id> | set <id> k=v… | rm <id>   show, change or remove one (magpie group help for more)
@@ -102,7 +102,6 @@ const usage = `magpie — one place to pick every agent's model
   magpie plugin [add <package>|rm|update|on|off|login <provider>|logout <provider>]
                                   OpenCode provider plugins and pi packages: subscriptions signed in to, and served, through a plugin
   magpie plugin move|migrate <subscription>   run a built-in subscription's accounts on its community plugin
-  magpie plugin move-back|unmigrate <subscription>   go back to the built-in, with its accounts
 
   magpie serve [--web[=host:port]] [--tls-cert <file> --tls-key <file>]
                                   run the gateway alone (the app runs it too); --web serves magpie web's page too, from the same process (127.0.0.1:3430 unless told);
@@ -114,12 +113,16 @@ const usage = `magpie — one place to pick every agent's model
   magpie daemon web [on|off] [--lan] [--addr host:port]
                                   the service's page: its link, or turn it on or off
   magpie healthcheck              exit 0 when the gateway answers (a container's HEALTHCHECK)
+  magpie heap [<file>]            a Go heap profile of the running magpie, with its memory numbers, for a report of it using too much memory
+  magpie cpu [<file>] [--seconds N]   a Go CPU profile of the running magpie over 30s (5..120) while you use it, for a report of it using too much CPU
   magpie gateway-key list|add <name>|rotate <id>|remove <id>   manage the keys clients use to call a shared gateway
-  magpie gateway-key limit <id> [off|reset|day|week|month|<N>d --tokens N --cost USD --cache-reads]   a key's own limit, and what it used
+  magpie gateway-key limit <id> [list|off|reset [n]|remove <n>|[add] day|week|month|<N>d|<N>h --tokens N --cost USD --cache-reads]   a key's own limits, and what it used
   magpie gateway-key models <id> [all|<provider>/<model>|<provider>/* ...]   the models a key may use, every one unless it names some
+  magpie gateway-key quotas <id> [on|off]   whether a key held to a budget, models or accounts is told the quotas of what it may use
   magpie mcp image                the image and video generation MCP server an agent is given from the library (stdio)
   magpie usage [today|7d|30d|all] tokens and cost per agent, model and subscription account (30d)
   magpie usage --csv [--account <name>] [today|7d|30d|all]   every request as CSV (or one account's): the model asked for, sent and served, tokens, cost, time, status, account
+  magpie usage [--csv [--account <name>]] --last <dur>|--days <n>   the same for a window ending now (24h, 90m, 1.5 days), not from a midnight
   magpie sessions [--model <m>] [--folder <f>] [--json]   the latest Claude Code, Codex, OpenCode and Pi sessions, with what each cost
   magpie sessions --days N|today|all [--model <m>] [--folder <f>] [--json]
                                   what every session spent, day by day, with the top models and folders (7 days)
@@ -136,7 +139,9 @@ const usage = `magpie — one place to pick every agent's model
                                   http(s):// or socks5:// proxy for it; --mirror: a GitHub download mirror put
                                   before the github.com URL (none unless given; still checked against usemagpie.ai's SHA-256)
   magpie update mirror [<prefix>|off]  the mirror every update, the app's own too, is downloaded through
-  magpie update auto [on|off] [30m|1h|6h|24h]  whether the app looks for updates by itself, and how often (6h)
+  magpie update auto [on|off] [download|notify] [30m|1h|6h|24h]
+                                  whether the app looks for updates by itself, how often (6h), and whether
+                                  it downloads one at once or only says it is out (notify: for metered networks)
 
 agents: claude (cc), codex, gemini, opencode (oc), mimocode, deveco, pi, goose, cursor, zed, copilot, crush, aside
 `
@@ -218,6 +223,14 @@ func run(args []string) error {
 	if len(args) > 0 && args[0] == "healthcheck" {
 		return healthcheck() // every few seconds in a container: nothing else
 	}
+	if len(args) > 0 && args[0] == "heap" {
+		// the running magpie's heap profile: asks it, and moves nothing here
+		return heapCmd(args[1:])
+	}
+	if len(args) > 0 && args[0] == "cpu" {
+		// the running magpie's CPU profile: asks it, and moves nothing here
+		return cpuCmd(args[1:])
+	}
 	if len(args) == 2 && args[0] == agent.DryRunArg {
 		// an agent disconnected on a copy of its files under a temporary
 		// home, for the Agents page to show what disconnecting changes
@@ -267,6 +280,9 @@ func run(args []string) error {
 	// and Cursor Private Inference's variables, which the Mac's launchd
 	// forgets at a restart, for the gateway's address now
 	gateway.WhileServing = append(gateway.WhileServing, agent.KeepCursorLocalEnv)
+	// and Claude Science's daemon, which a restart of the computer ends,
+	// started on the gateway again while it is connected
+	gateway.WhileServing = append(gateway.WhileServing, agent.KeepClaudeScience)
 	// and the request archive, when it is on, goes to the bucket sync is to
 	gateway.ArchiveBucket = func() (gateway.Putter, bool) {
 		if b, ok := davsync.S3Bucket(); ok {
@@ -407,6 +423,10 @@ func run(args []string) error {
 		// `magpie cindy`: it takes magpie through its own link, confirmed there
 		if len(args) > 1 {
 			link := a.Import()
+			if link == "" {
+				// Lody takes only a gateway on this computer's loopback
+				return fmt.Errorf("%s takes magpie only at a loopback address, and the gateway is at %s: nothing was opened", a.Name, gateway.URL())
+			}
 			openInBrowser(link)
 			fmt.Println(green.Render("✓"), bold.Render(a.Name), muted.Render("opened to add magpie — confirm it there"))
 			fmt.Println(muted.Render("  " + link))
@@ -493,7 +513,7 @@ func set(a *agent.Agent, key, value string) error {
 	if wired && now != "" && !a.Wired() {
 		fmt.Println(muted.Render(fmt.Sprintf("  disconnected from magpie: %s is %s's own, sent to the endpoint it had before magpie; magpie %s <model> with one of magpie's models connects it again", now, a.Name, a.ID)))
 	}
-	if a.Notice != nil {
+	if a.Notice != nil && (!f.Live || !wired && a.Wired()) {
 		if n := a.Notice(); n != "" {
 			fmt.Println(muted.Render("  ↻ " + n))
 		}
@@ -610,6 +630,11 @@ func list(agents []*agent.Agent, detectedOnly bool, dimFrom int) error {
 			r.name = faint.Render(a.Name)
 			r.vals = faint.Render("not detected")
 			r.path = ""
+		} else if a.CLIMissing() {
+			// its folder left by an uninstall (#2173): what it holds is
+			// read by nothing
+			r.name = faint.Render(a.Name)
+			r.vals = faint.Render("CLI not found")
 		} else {
 			vals := a.Values()
 			dim := dimFrom >= 0 && i >= dimFrom
