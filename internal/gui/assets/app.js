@@ -3566,6 +3566,7 @@ function openAgentMenu(anchor, a, inFold) {
         // everything magpie wrote comes out, what the user had goes back (Fate on Discord)
         ...(a.wired ? [{ name: "Disconnect from magpie", icon: UNPLUG, sep: !reapply, tip: t(DISCONNECT_TIP, { agent: a.name }), run: () => askDisconnect(a) }] : []),
         { name: "Hide", icon: EYE_OFF, sep: true, run: () => setAgentHidden(a, true) },
+        ...magpie.actions?.("agent", { agent: { id: a.id, name: a.name } }) || [],
       ];
   openRowMenu(anchor, acts);
 }
@@ -3581,7 +3582,8 @@ function openRowMenu(anchor, acts) {
     b.type = "button";
     b.setAttribute("role", "menuitem");
     b.disabled = !!o.off;
-    b.append(svg(o.icon, 13, 1.5), el("span", "rm-name", t(o.name)));
+    // a plugin's item (magpie.actions) is named in its own words
+    b.append(svg(o.icon, 13, 1.5), el("span", "rm-name", o.literal ? o.name : t(o.name)));
     if (o.key) b.append(el("span", "rm-key", o.key));
     if (o.tip) b.title = o.tip;
     // an item that is off can say why, under its name and as its title
@@ -5833,6 +5835,7 @@ function openProviderMenu(anchor, p) {
     { name: "Move up", icon: MOVE_UP, key: ALT + "↑", off: k <= 0, run: () => stepProvider(p.id, -1) },
     { name: "Move down", icon: MOVE_DOWN, key: ALT + "↓", off: k < 0 || k >= shown.length - 1, run: () => stepProvider(p.id, 1) },
     { name: "Move to bottom", icon: MOVE_BOTTOM, key: ALT + SHIFT + "↓", off: i === on.length - 1, run: () => arrangeProvider(p.id, on.length - 1) },
+    ...magpie.actions?.("provider", { provider: { id: p.id, name: p.name } }) || [],
   ]);
 }
 
@@ -9734,6 +9737,8 @@ function drawEditor(p, presetID) {
   };
   saveBtn.onclick = save;
   bar.append(cancel, saveBtn);
+  // a plugin's panels for a provider (magpie.panels' provider), told which
+  if (p) { const slot = magpie.slot?.("provider", { provider: { id: p.id, name: p.name || p.id } }); if (slot) ed.append(slot); }
   ed.append(bar);
   setTimeout(() => (isNew ? (custom || another ? name : endpoint || vertexProject || key) : null)?.focus(), 0);
   return ed;
@@ -18787,7 +18792,7 @@ function tabKeys(tabs, sel) {
 // tab. A click on a tab, like every click, leaves the page where it is: the
 // tabs at the top stay where they were and the part comes in under them.
 // Picked in the sidebar, a part opens at its top (navSubs).
-const SET_TABS = ["general", "usage", "network", "models", "privacy", "otel", "sync", "about"];
+const SET_TABS = ["general", "usage", "network", "models", "privacy", "otel", "sync", "plugins", "about"];
 let setTab = "general";
 try { const k = localStorage.getItem("magpie.settingsTab"); if (SET_TABS.includes(k)) setTab = k; } catch {}
 let setShown = setTab; // the part shown: the one picked, or the first there
@@ -18807,7 +18812,9 @@ function setSetTab(tab, remember) {
     setTab = tab;
     try { localStorage.setItem("magpie.settingsTab", tab); } catch {}
   }
-  for (const id of SET_TABS) $("#setTab-" + id).hidden = featureHides($("#setTab-" + id)) || !partShows($("#setPage-" + id));
+  // Plugins is there while a plugin's panel is (magpie.panels' settings)
+  for (const id of SET_TABS) $("#setTab-" + id).hidden = featureHides($("#setTab-" + id)) || !partShows($("#setPage-" + id))
+    || (id === "plugins" && !$("#setPage-plugins .plugin-panel"));
   if (!SET_TABS.includes(tab) || $("#setTab-" + tab).hidden) tab = SET_TABS.find((id) => !$("#setTab-" + id).hidden) || "general";
   for (const id of SET_TABS) {
     const b = $("#setTab-" + id), on = id === tab;
@@ -22560,11 +22567,14 @@ for (const v of document.querySelectorAll(".view")) {
 }
 
 async function show(v) {
+  // a built-in page a plugin's page replaces (magpie.page.replaces) opens that
+  v = magpie.replacing?.(v) || v;
   // a page gateway mode leaves out (a link to it, an address kept) opens Providers
   if (gatewayMode && GATEWAY_HIDES.includes(v)) v = "providers";
   // and one a built-in plugin switched off has, Agents
   if (featureHides($(`#nav button[data-view="${v}"]`))) v = gatewayMode ? "providers" : "agents";
   if (v !== view) {
+    if (v === "plugins" && pluginUpdates) window.pluginTabTo?.("installed");
     if (view === "providers" && (editing !== null || importing || importingApps)) {
       if (!await cancelEdit(true)) return false;
     } else if (!$("#modal").hidden && !$("#modal").classList.contains("out")) {
@@ -23125,13 +23135,13 @@ function navSubs() {
   // a group none of whose pages shows (gateway mode's) leaves out its name
   for (const gl of nav.querySelectorAll(".nav-gl")) {
     let any = false;
-    for (let n = gl.nextElementSibling; n && !n.matches(".nav-gl"); n = n.nextElementSibling) if (n.dataset.view && !n.hidden) any = true;
+    for (let n = gl.nextElementSibling; n && !n.matches(".nav-gl"); n = n.nextElementSibling) if (n.dataset.view && !n.hidden && !n.dataset.replaced) any = true;
     gl.hidden = !any;
   }
   const side = sideNav();
   const items = side ? navSubItems(view) : [];
   const at = view === "settings" ? $("#prefs") : nav.querySelector(`button[data-view="${view}"]`);
-  const sig = [side, view, locale, ...items.map((b) => b.textContent.trim() + (b.classList.contains("on") ? "*" : ""))].join("|");
+  const sig = [side, view, locale, pluginUpdates, ...items.map((b) => b.textContent.trim() + (b.classList.contains("on") ? "*" : ""))].join("|");
   if (sig === navSubsAt) return;
   navSubsAt = sig;
   let box = document.querySelector(".nav-sub:not(.leaving)");
@@ -23167,7 +23177,11 @@ function navSubs() {
       s.setAttribute("aria-selected", String(cur));
       s.tabIndex = cur ? 0 : -1;
       s.append(el("span", "", name));
-      if (n) s.append(el("em", "", n));
+      if (b.dataset.sub === "installed" && pluginUpdates) {
+        const up = el("em", "up", t(pluginUpdates === 1 ? "1 update" : "{n} updates", { n: pluginUpdates }));
+        s.title = t("Newer versions of your plugins are out: update them under Installed");
+        s.append(up);
+      } else if (n) s.append(el("em", "", n));
       // the selection goes as the finger comes down, as iOS's does, not once
       // the page has drawn the tab; let go off the row, it goes back
       s.onpointerdown = (e) => { if (e.button === 0) navSubGlide(box, s); };
@@ -23430,9 +23444,13 @@ async function renderPluginDot() {
   const u = await api("plugins/updates").catch(() => null);
   const n = u?.waiting?.length || 0;
   b.classList.toggle("has-dot", n > 0);
+  // the dot says itself where the reader acts on it: Installed, under
+  // Plugins in the sidebar, reads "1 update" in its count's place
+  if (pluginUpdates !== n) { pluginUpdates = n; navSubs(); }
   if (n) b.title = t(n === 1 ? "An update for {name} is out" : "Updates for {n} plugins are out", { n, name: u.waiting[0].package });
   else b.removeAttribute("title");
 }
+var pluginUpdates = 0;
 window.renderPluginDot = renderPluginDot;
 renderPluginDot();
 window.addEventListener("focus", renderPluginDot);

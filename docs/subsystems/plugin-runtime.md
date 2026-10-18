@@ -13,7 +13,7 @@ Sessions, Library, Routing and Usage), and P3 (the gateway's
 extension points: the observer, with OTel export as its first plugin; the
 router strategy, with the routings besides Smart and the user's groups; and
 the middleware point, with the JS gateway middleware and privacy masking;
-the tool point, with web search; and the budget point, with key limits). OpenCode plugins (npm packages in
+the tool point, with web search; and the budget point, with key limits), P4 (community plugins at each of those points) P5 (community panels in magpie's own pages, and a plugin's page in a built-in's place) and P6 (a plugin's items in a provider's and an agent's row menu). OpenCode plugins (npm packages in
 the plugin host) are a different thing; see
 [provider and plugin ownership](provider-plugins.md) and
 [gateway middleware](gateway-middleware.md).
@@ -263,6 +263,110 @@ still means off; a page is its own plugin's to turn on and off.
 
 `plugins/middleware` is now "JS gateway plugins". Apply registers the chain and `usage.Observe(middleware.Points())`; off, no JS middleware, strategy or `onUsage` runs, and a pool routed by a JS strategy is its listed order. `InUse` is unchanged. ([`middleware.go`](../../plugins/middleware/middleware.go))
 
+## P5: panels in magpie's own pages, and pages that replace one
+
+P5 lets a community plugin into the pages magpie draws itself, not only a
+page of its own. Both come from package.json and are read by
+`plugin.Window` ([`page.go`](../../internal/plugin/page.go)); neither
+starts a Bun host.
+
+- **Panels.** `magpie.panels: [{slot, file, title}]`, at most 8 a plugin
+  (`maxPanels`), each `slot` one of `plugin.PanelSlots`: `agents` (the end
+  of the Agents page), `usage` (the end of Usage's Overview), `settings` (a
+  Plugins tab in Settings, shown only while a panel is in it, in the tab
+  strip and in the sidebar of a wide window) and `provider` (each saved
+  provider's editor, told `{provider: {id, name}}`). `file` is an .html in
+  the plugin's folder (`plugin.FileIn`). `GET /api/plugin-panels` lists an
+  on plugin's panels in plugins.json order, each with a token of its own
+  (`pageToken(spec + "\x00panel\x00" + i)`), served under the same policy
+  as a page ([`pluginpage.go`](../../internal/gui/pluginpage.go)). A
+  panel's frame is sandboxed to `allow-scripts` like a page's, and shares
+  its plugin's reads (`magpie.permissions`) and options through the same
+  `/api/plugin-pages/read` and `/options`. The bridge
+  ([`pagebridge.js`](../../internal/gui/pagebridge.js)) gives it
+  `magpie.context` and posts its height (`size`), which the window holds
+  to 0..2400px. A panel that throws, or doesn't say hello in 10s, is
+  replaced by its own card ("{name} stopped working", Try again); the page
+  around it and the panels beside it go on. The size watch's own
+  "ResizeObserver loop" notice, which WebKit gives a sandboxed page as a
+  bare "Script error.", is not a throw.
+- **Titles and look.** `magpie.page.titles` and a panel's `titles`, an
+  object of language code to title (`plugin.titles`: trimmed, empty ones
+  and a non-object dropped), name the tab and the panel's heading in the
+  window's language, `zh-TW` falling back to `zh` and anything else to
+  `title` (`titled` in [`pluginpages.js`](../../internal/gui/assets/pluginpages.js),
+  redrawn when `<html lang>` changes). The bridge prepends a stylesheet of
+  `:where()` rules, of no weight, for the font, colours, headings, buttons,
+  fields and tables, so a page with no stylesheet reads as the window's
+  and any rule of the page's wins. Tests: `TestWindowTitles`,
+  `plugin-page.test.cjs`.
+- **The policy's scheme.** The desktop window serves on `wails://localhost`
+  (macOS, Linux), and a sandboxed frame has an opaque origin, so a CSP
+  source without a scheme matches only http(s) there. `ownWindow` puts the
+  native scheme on the request's context and `pagePolicy` names the folder
+  under it (#2501); the web keeps a scheme-less source.
+  `TestPluginPageWindowPolicy` checks the policy, and
+  `TestPluginPageLoadsItsFilesInTheWindow` loads a page through
+  `ownWindow` in a real WKWebView; Playwright, on http, can't see it.
+- **Slots.** A page names a slot with `<div class="plugin-slot"
+  data-slot="…" hidden>` in its markup, or app.js draws one with
+  `magpie.slot(name, context)` ([`pluginpages.js`](../../internal/gui/assets/pluginpages.js)).
+  A slot is filled when the panels come, again only when they changed (a
+  panel open goes on as it is), and when the kernel writes a page's markup
+  afterwards (`magpie.fillSlots`, from `add` and Try again).
+- **Replacing a page.** `magpie.page.replaces`, one of `plugin.Replaceable`
+  (`sessions`, `library`, `routing`, `usage`), puts the plugin's page in
+  the built-in's place in the sidebar: the built-in's button is hidden
+  (`data-replaced`) and `show()` of it opens the plugin's page
+  (`magpie.replacing`). The first on plugin in plugins.json's order takes
+  a page; another asking for the same is a page of its own. The built-in
+  page is still there, and comes back when the plugin is off.
+- **The Plugins page** says, on the row, where a plugin's panels go and
+  what they read, and which page it takes the place of (`panelsLine`,
+  `pageLine` in [`plugins.js`](../../internal/gui/assets/plugins.js)),
+  with a Panels chip.
+
+Tests: `TestWindowPanels`, `TestPluginPanelsServedShutIn`,
+`TestPluginPanelsReadWhatTheyDeclared`, `TestPluginPageReplacesFirstWins`,
+`plugin-panels.test.cjs`. Example: `internal/gui/testdata/panel-plugin`.
+
+## P6: actions in magpie's menus
+
+P6 lets a plugin's page add items to the row menus magpie draws: a
+provider row's (right-click) and an agent row's (its handle, or
+right-click). An item opens the plugin's page and tells it what was picked;
+the page does the work. Read by `plugin.Window` with the rest of the window
+manifest ([`page.go`](../../internal/plugin/page.go)); no Bun host.
+
+- **The manifest.** `magpie.actions: [{id, menu, title, titles}]`. `menu`
+  is one of `plugin.ActionMenus` (`provider`, `agent`); a session's menu is
+  left out, since a session's title is the user's content. `id` matches
+  `actionID` (`^[a-z0-9][a-z0-9-]{0,39}$`), an id given twice is the
+  first's, and a plugin has 8 at most (`maxActions`). A plugin with no page
+  has no actions: an action is a way into its page. A missing title is the
+  page's, in each language (`windowParts` in
+  [`pluginpage.go`](../../internal/gui/pluginpage.go)); `/api/plugin-pages`
+  carries them on the page.
+- **The menus.** `magpie.actions(menu, context)`
+  ([`pluginpages.js`](../../internal/gui/assets/pluginpages.js)) gives the
+  items, after magpie's own and a separator, named by `titled` and drawn
+  as the plugin wrote them (`literal` in `openRowMenu`, not through `t()`).
+  `openProviderMenu` passes `{provider: {id, name}}`, `openAgentMenu`
+  `{agent: {id, name}}`, and nothing else of the row.
+- **Picking one** runs `show(key)` (an unsaved edit the reader keeps
+  stops it there), waits for the page's hello, and posts `{event:
+  "action", data: {id, ...context}}` to that frame only. The bridge
+  ([`pagebridge.js`](../../internal/gui/pagebridge.js)) hands it to
+  `magpie.onAction(fn)`; an action that came before `fn` was given waits
+  for it, and a throw in `fn` is the page's error ("stopped working").
+- **The Plugins page** says on the row which menus a plugin adds to
+  (`actionsLine` in [`plugins.js`](../../internal/gui/assets/plugins.js)),
+  from the row's `actions` ([`plugins.go`](../../internal/gui/plugins.go)),
+  said of a plugin switched off too.
+
+Tests: `TestWindowActions`, `TestPluginPageActions`,
+`plugin-actions.test.cjs`.
+
 ## Source of truth and composing
 
 What a plugin runs with is composed field by field (`Compose`), each value
@@ -374,5 +478,16 @@ remembering its layer (`Source`):
   on; `TestMaskingOnAndOff`, `TestMaskedQueryFailsClosed` and
   `TestMiddlewareOnAndOff` turn them off: masking asked for is a 503 and
   the vendor gets nothing, middleware off sends the request as it came).
+- P5: `go test ./internal/plugin/ -run TestWindowPanels`,
+  `go test ./internal/gui/ -run 'TestPluginPanels|TestPluginPageReplaces'`
+  and `plugin-panels.test.cjs` (every slot, a broken panel and Try again,
+  the size watch's loop notice, a replaced Library, the Settings tab
+  coming and going) in Chromium and WebKit, every language, 1100 and 420
+  points (the Plugins page's rows at 980 and 420).
+- P6: `go test ./internal/plugin/ -run TestWindowActions`,
+  `go test ./internal/gui/ -run TestPluginPageActions` and
+  `plugin-actions.test.cjs` (both menus, a page that gives its handler
+  late, no plugin adding nothing, the Plugins row) in Chromium and WebKit,
+  every language, 1100 and 420 points.
 - By hand, under a sandbox HOME: `magpie plugin builtin`, `magpie plugin
   builtin on groups`, `magpie plugin dump`, and a plugins.yml broken by hand.
