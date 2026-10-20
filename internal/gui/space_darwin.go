@@ -62,37 +62,45 @@ static int appFrontmost(void) {
 // Whether the Space the user is on is another app's full-screen one. A
 // regular window cannot join it, and one shown moving to the active Space
 // lands over the full-screen app in a state no click takes away — not the
-// Dock's icon, not another app's, only a swipe. Another app's window
-// filling a screen entirely, on screen now, says the Space is that app's
-// full-screen, whoever is frontmost: an app just activated still shows
-// the full-screen window until the Mac switches Spaces. magpie's own
-// doesn't count (its window joins the user on its full-screen Space
-// fine), and a windowed-fullscreen game on another screen can say so of
-// a Space that isn't, which only leaves the window on its own Space, the
-// Mac taking the user to it as any app's icon does.
+// Dock's icon, not another app's, only a swipe. The app to ask of is the
+// frontmost one, or when magpie itself is (its window just shown, the Mac
+// not yet switched Spaces) the one before it: that app's on-screen
+// windows jointly cover a screen — Ghostty's full-screen is two windows,
+// a title strip and the content, each short of the screen alone — while
+// the window list leaks other Spaces' full-screen windows (a desktop can
+// list several apps' screen-filling ones stacked elsewhere), which any
+// other app's would be taken for. Windows of that one app tiled side by
+// side on a Space that isn't full-screen can still say so of it, which
+// only leaves the window on its own Space, the Mac taking the user to it
+// as any app's icon does.
+static int lastForeignApp(void) {
+	static int last;
+	int now = [NSWorkspace sharedWorkspace].frontmostApplication.processIdentifier;
+	if (now != 0 && now != NSProcessInfo.processInfo.processIdentifier) last = now;
+	return last;
+}
+
 static int activeSpaceFullScreen(void) {
+	int app = lastForeignApp();
+	if (app == 0) return 0;
 	CFArrayRef list = CGWindowListCopyWindowInfo(kCGWindowListOptionOnScreenOnly | kCGWindowListExcludeDesktopElements, kCGNullWindowID);
 	if (list == nil) return 0;
-	int full = 0;
-	for (NSUInteger i = 0; !full && i < CFArrayGetCount(list); i++) {
+	NSRect u = NSZeroRect;
+	for (NSUInteger i = 0; i < CFArrayGetCount(list); i++) {
 		NSDictionary *w = (__bridge NSDictionary *)CFArrayGetValueAtIndex(list, i);
-		if ([w[(id)kCGWindowOwnerPID] intValue] == NSProcessInfo.processInfo.processIdentifier) continue;
+		if ([w[(id)kCGWindowOwnerPID] intValue] != app) continue;
 		if ([w[(id)kCGWindowLayer] intValue] != 0) continue;
 		NSDictionary *b = w[(id)kCGWindowBounds];
 		if (![b isKindOfClass:[NSDictionary class]]) continue;
-		for (NSScreen *s in [NSScreen screens]) {
-			NSRect f = s.frame;
-			if (fabs([b[@"X"] doubleValue] - f.origin.x) < 1 &&
-				fabs([b[@"Y"] doubleValue] - f.origin.y) < 1 &&
-				fabs([b[@"Width"] doubleValue] - f.size.width) < 1 &&
-				fabs([b[@"Height"] doubleValue] - f.size.height) < 1) {
-				full = 1;
-				break;
-			}
-		}
+		NSRect r = NSMakeRect([b[@"X"] doubleValue], [b[@"Y"] doubleValue], [b[@"Width"] doubleValue], [b[@"Height"] doubleValue]);
+		u = u.size.width == 0 ? r : NSUnionRect(u, r);
 	}
 	CFRelease(list);
-	return full;
+	if (u.size.width == 0) return 0;
+	for (NSScreen *s in [NSScreen screens]) {
+		if (NSContainsRect(u, s.frame)) return 1;
+	}
+	return 0;
 }
 
 // Ordered in and not in the Dock: on a Space of its own, or covered, it is
