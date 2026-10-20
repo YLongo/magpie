@@ -64,6 +64,12 @@ func (a *Agent) cliHeld() (held, known bool) {
 		at = []string{filepath.Join(home, ".codex", "packages", "standalone")}
 	case "hermes":
 		at = []string{filepath.Join(a.Dir, "hermes-agent")}
+	case "pi":
+		// Pi's installer puts pi in its agent folder's bin/, which only a
+		// shell profile adds to PATH; the login shell UserPath asked can
+		// answer without it (its -ilc try failed over to -lc, which reads
+		// no .zshrc), and Pi read gone for as long as magpie ran
+		at = []string{filepath.Join(a.Dir, "bin", exe("pi"))}
 	}
 	for _, p := range at {
 		if _, err := os.Stat(p); err == nil {

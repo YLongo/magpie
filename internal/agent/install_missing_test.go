@@ -139,6 +139,32 @@ func TestCLIMissingHermes(t *testing.T) {
 	}
 }
 
+// Pi's installer puts pi in its agent folder's bin/, leaving it to a shell
+// profile to put on PATH: that binary is Pi installed, even where magpie's
+// PATH and FindTool's folders don't reach — the login shell UserPath asked
+// can answer without the profile's folders, so PATH alone reads Pi gone.
+func TestCLIMissingPi(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("PATH", t.TempDir())
+	noApps(t)
+	dir := filepath.Join(home, ".pi", "agent")
+	writeT(t, filepath.Join(dir, "settings.json"), "{}\n")
+	p := &Agent{ID: "pi", Name: "Pi", Bin: "magpie-test-gone-pi", Dir: dir, Path: filepath.Join(dir, "settings.json")}
+	if !p.Detected() || !p.CLIMissing() {
+		t.Fatalf("pi by its settings alone: detected %v, missing %v", p.Detected(), p.CLIMissing())
+	}
+	bin := filepath.Join(dir, "bin", "pi")
+	if runtime.GOOS == "windows" {
+		bin += ".exe"
+	}
+	testenv.Program(t, bin, "#!/bin/sh\n")
+	if p.CLIMissing() {
+		t.Fatal("pi in its own ~/.pi/agent/bin taken for missing")
+	}
+}
+
 // An agent whose folder isn't only its CLI's is gone only when nothing
 // else that reads it is here: an editor's extension, a desktop app, an
 // IDE whose agents bring their own program. Never one magpie can't tell
