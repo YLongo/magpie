@@ -64,12 +64,13 @@ static int appFrontmost(void) {
 // lands over the full-screen app in a state no click takes away — not the
 // Dock's icon, not another app's, only a swipe. Another app's window
 // filling a screen entirely, on screen now, says the Space is that app's
-// full-screen; magpie's own doesn't count (its window joins the user on
-// its full-screen Space fine), and a windowed-fullscreen game on another
-// screen can say so of a Space that isn't, which only leaves the window
-// on its own Space, the Mac taking the user to it as any app's icon does.
+// full-screen, whoever is frontmost: an app just activated still shows
+// the full-screen window until the Mac switches Spaces. magpie's own
+// doesn't count (its window joins the user on its full-screen Space
+// fine), and a windowed-fullscreen game on another screen can say so of
+// a Space that isn't, which only leaves the window on its own Space, the
+// Mac taking the user to it as any app's icon does.
 static int activeSpaceFullScreen(void) {
-	if (appFrontmost()) return 0;
 	CFArrayRef list = CGWindowListCopyWindowInfo(kCGWindowListOptionOnScreenOnly | kCGWindowListExcludeDesktopElements, kCGNullWindowID);
 	if (list == nil) return 0;
 	int full = 0;
