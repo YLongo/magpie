@@ -312,7 +312,13 @@ const spaceSettle = 500 * time.Millisecond
 // activating magpie in any way (the Dock, Command-Tab) would pull the open
 // window off its own Space onto the user's (#1252).
 func showHere(w *application.WebviewWindow) {
-	setMovesToActiveSpace(w, true)
+	// over another app's full-screen Space the window cannot join it, and
+	// shown as moving to the active Space it lands there in a state no
+	// click takes away, the Dock's icon included: there it stays on its
+	// own Space, and the Mac, activated, takes the user to it
+	if !activeSpaceFullScreen() {
+		setMovesToActiveSpace(w, true)
+	}
 	w.Show()
 	w.Focus()
 	time.AfterFunc(spaceSettle, func() {

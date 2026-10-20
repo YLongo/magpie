@@ -15,3 +15,5 @@ func windowUp(w *application.WebviewWindow) bool { return w.IsVisible() }
 func activateApp() {}
 
 func watchHide() {}
+
+func activeSpaceFullScreen() bool { return false }

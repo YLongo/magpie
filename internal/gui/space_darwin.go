@@ -59,6 +59,41 @@ static int appFrontmost(void) {
 	return [NSWorkspace sharedWorkspace].frontmostApplication.processIdentifier == NSProcessInfo.processInfo.processIdentifier;
 }
 
+// Whether the Space the user is on is another app's full-screen one. A
+// regular window cannot join it, and one shown moving to the active Space
+// lands over the full-screen app in a state no click takes away — not the
+// Dock's icon, not another app's, only a swipe. Another app's window
+// filling a screen entirely, on screen now, says the Space is that app's
+// full-screen; magpie's own doesn't count (its window joins the user on
+// its full-screen Space fine), and a windowed-fullscreen game on another
+// screen can say so of a Space that isn't, which only leaves the window
+// on its own Space, the Mac taking the user to it as any app's icon does.
+static int activeSpaceFullScreen(void) {
+	if (appFrontmost()) return 0;
+	CFArrayRef list = CGWindowListCopyWindowInfo(kCGWindowListOptionOnScreenOnly | kCGWindowListExcludeDesktopElements, kCGNullWindowID);
+	if (list == nil) return 0;
+	int full = 0;
+	for (NSUInteger i = 0; !full && i < CFArrayGetCount(list); i++) {
+		NSDictionary *w = (__bridge NSDictionary *)CFArrayGetValueAtIndex(list, i);
+		if ([w[(id)kCGWindowOwnerPID] intValue] == NSProcessInfo.processInfo.processIdentifier) continue;
+		if ([w[(id)kCGWindowLayer] intValue] != 0) continue;
+		NSDictionary *b = w[(id)kCGWindowBounds];
+		if (![b isKindOfClass:[NSDictionary class]]) continue;
+		for (NSScreen *s in [NSScreen screens]) {
+			NSRect f = s.frame;
+			if (fabs([b[@"X"] doubleValue] - f.origin.x) < 1 &&
+				fabs([b[@"Y"] doubleValue] - f.origin.y) < 1 &&
+				fabs([b[@"Width"] doubleValue] - f.size.width) < 1 &&
+				fabs([b[@"Height"] doubleValue] - f.size.height) < 1) {
+				full = 1;
+				break;
+			}
+		}
+	}
+	CFRelease(list);
+	return full;
+}
+
 // Ordered in and not in the Dock: on a Space of its own, or covered, it is
 // still open, where Wails' IsVisible (its occlusion state) says it isn't.
 static int windowOpen(void *win) {
@@ -144,6 +179,11 @@ func nonActivating(w *application.WebviewWindow) bool {
 // appFrontmost says whether magpie is the frontmost app, the one whose
 // menu bar shows; on the main thread.
 func appFrontmost() bool { return C.appFrontmost() != 0 }
+
+// activeSpaceFullScreen says whether the Space the user is on is another
+// app's full-screen one, which a window of magpie's cannot join; on the
+// main thread.
+func activeSpaceFullScreen() bool { return C.activeSpaceFullScreen() != 0 }
 
 // windowOpen says whether w is open: shown, on any Space, and not
 // minimised; on the main thread.
