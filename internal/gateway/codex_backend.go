@@ -112,6 +112,10 @@ func (s *Server) codexBackend(w http.ResponseWriter, r *http.Request) {
 				s.codexDescription(w, r, body, to)
 				return
 			}
+			if to := codexSummariesTo(r.Header, body, false); to != "" {
+				s.codexSummary(w, r, body, to)
+				return
+			}
 			if to := codexPredictionsTo(r.Header, body, false); to != "" {
 				s.codexPrediction(w, r, body, to)
 				return
@@ -411,7 +415,12 @@ func loggedAnswers(convs ...string) []loggedAnswer {
 		return nil
 	}
 	var all []loggedAnswer
+	// a provider renamed since answered by the id it has now, the one
+	// its candidates have (cybercaius: a renamed provider was told apart
+	// from itself)
+	renamed := provider.UsageRenames()
 	usage.Visit(time.Now().Add(-sealerKeep), func(r usage.Record) {
+		r.Provider = renamed.Of(r.Provider, r.Time)
 		if r.Provider == "" || r.Provider == "magpie" || r.IsRejected() || r.IsReported() || r.Status <= 0 || r.Status >= 400 || r.Computer != "" || isTitleKind(r.Kind) {
 			return
 		}
@@ -501,22 +510,22 @@ func leadFirst(scope, parent string, cands []candidate, pl planned) ([]candidate
 // fields (including ordinary model history) keep their existing handling.
 func hasSealedAgentMessage(body []byte) bool {
 	var request map[string]json.RawMessage
-	if decodeJSON(body, &request) != nil {
+	if decodeJSONView(body, &request) != nil {
 		return false
 	}
-	var items []json.RawMessage
-	if decodeJSON(request["input"], &items) != nil {
+	items, isList := inputList(request["input"])
+	if !isList {
 		return false
 	}
 	for _, raw := range items {
 		var item struct {
-			Type    string            `json:"type"`
-			Content []json.RawMessage `json:"content"`
+			Type    string          `json:"type"`
+			Content json.RawMessage `json:"content"`
 		}
-		if decodeJSON(raw, &item) != nil || item.Type != "agent_message" {
+		if decodeJSONView(raw, &item) != nil || item.Type != "agent_message" {
 			continue
 		}
-		for _, content := range item.Content {
+		for _, content := range elementsOf(trimJSON(item.Content)) {
 			var part struct {
 				Type             string `json:"type"`
 				EncryptedContent string `json:"encrypted_content"`
@@ -1511,7 +1520,7 @@ func withoutItem(body []byte, id string) ([]byte, bool) {
 		return nil, false
 	}
 	q["input"], _ = json.Marshal(kept)
-	b, err := json.Marshal(q)
+	b, err := marshalJSON(q)
 	return b, err == nil
 }
 
@@ -2539,6 +2548,33 @@ func forVendor(p provider.Provider, body []byte) []byte {
 	return nb
 }
 
+// keepsAccessPrograms says a Responses request to p goes with its top-level
+// access_programs, the Cyber program a request asks the model under
+// (OpenAI's Daybreak, magpie-releases#18): to the ChatGPT backend, to
+// OpenAI's API, to another magpie (whose own upstream decides), and to a
+// relay that takes Codex's requests as Codex sent them (CodexAsSent). Codex
+// itself sends the field to nobody else: only with a ChatGPT sign-in, or an
+// API key on its provider named "openai" (codex-rs cyber_access_program.rs,
+// for_auth and for_provider), which is how it comes to magpie. OpenCode Go
+// answers it, for DeepSeek and GLM, with a 503 "Endpoint is unavailable"
+// that says nothing of the field (#3172), and no other vendor has a program
+// to read in it.
+func keepsAccessPrograms(p provider.Provider, in http.Header) bool {
+	return p.Account != nil && p.Account.Agent == "codex" ||
+		strings.HasSuffix(p.Host(), "openai.com") ||
+		p.IsRemoteMagpie() ||
+		p.CodexAsSent && p.Account == nil && fromCodex(in)
+}
+
+// withoutAccessPrograms is body without its top-level access_programs, the
+// rest byte for byte (withoutTopMember).
+func withoutAccessPrograms(body []byte) []byte {
+	if !bytes.Contains(body, []byte(`"access_programs"`)) {
+		return body
+	}
+	return withoutTopMember(body, "access_programs")
+}
+
 // forVendorChanges reports whether forVendor has anything to leave out of
 // body, read as it reads it, without decoding the conversation: Codex
 // sends what the rewrite looks for by name in every request, and its
@@ -2822,7 +2858,7 @@ func plainCompact(body []byte) []byte {
 		userMessage(codexCompactPrompt),
 	})
 	delete(q, "previous_response_id")
-	nb, err := json.Marshal(q)
+	nb, err := marshalJSON(q)
 	if err != nil {
 		return body
 	}
