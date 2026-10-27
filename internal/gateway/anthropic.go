@@ -119,8 +119,19 @@ func parseAnthropic(body []byte) (*Request, error) {
 }
 
 func parseAnthropicRequest(body []byte, clientMarks bool) (*Request, error) {
+	return readAnthropic(body, clientMarks, false)
+}
+
+// readAnthropic is parseAnthropicRequest; for facts (readFacts) it leaves
+// out what they never read, as readChat does: the assistant's blocks, the
+// tools' outputs, and the copies of raw values a parse kept would need.
+func readAnthropic(body []byte, clientMarks, facts bool) (*Request, error) {
+	decode := decodeJSON
+	if facts {
+		decode = decodeJSONView
+	}
 	var a aRequest
-	if err := decodeJSON(body, &a); err != nil {
+	if err := decode(body, &a); err != nil {
 		return nil, fmt.Errorf("invalid request: %v", err)
 	}
 	r := &Request{Model: a.Model, System: stringOrText(a.System), MaxTokens: a.MaxTokens,
@@ -144,6 +155,10 @@ func parseAnthropicRequest(body []byte, clientMarks bool) (*Request, error) {
 	}
 	for mi, m := range a.Messages {
 		msg := Message{Role: m.Role}
+		if facts && m.Role == "assistant" {
+			r.Messages = append(r.Messages, msg)
+			continue
+		}
 		var s string
 		if decodeJSON(m.Content, &s) == nil {
 			if s != "" {
@@ -151,7 +166,7 @@ func parseAnthropicRequest(body []byte, clientMarks bool) (*Request, error) {
 			}
 		} else {
 			var blocks []aBlock
-			if err := decodeJSON(m.Content, &blocks); err != nil {
+			if err := decode(m.Content, &blocks); err != nil {
 				return nil, fmt.Errorf("invalid message content: %v", err)
 			}
 			var raws []json.RawMessage // each block as the client sent it
@@ -167,6 +182,10 @@ func parseAnthropicRequest(body []byte, clientMarks bool) (*Request, error) {
 				case "tool_use":
 					msg.Parts = append(msg.Parts, Part{Kind: ToolCall, ID: anthropicInID(b.ID), Name: b.Name, Args: b.Input})
 				case "tool_result":
+					if facts {
+						msg.Parts = append(msg.Parts, Part{Kind: ToolResult, CallID: anthropicInID(b.ToolUseID)})
+						break
+					}
 					out, images := toolOutput(b.Content)
 					msg.Parts = append(msg.Parts, Part{Kind: ToolResult, CallID: anthropicInID(b.ToolUseID), Text: out, Images: images, IsError: b.IsError, Loads: toolRefs(b.Content)})
 				case "thinking":
@@ -1276,7 +1295,7 @@ func decodeAnthropic(data string, emit func(Event)) error {
 				emit(Event{Kind: KThink, Text: ev.ContentBlock.Thinking})
 			}
 			if ev.ContentBlock.Signature != "" {
-				emit(Event{Kind: KSig, Text: ev.ContentBlock.Signature})
+				emit(Event{Kind: KSig, Name: sealAnthropic, Text: ev.ContentBlock.Signature})
 			}
 		case "redacted_thinking":
 			// sealed whole: it goes on as it came, to Messages only
@@ -1296,7 +1315,7 @@ func decodeAnthropic(data string, emit func(Event)) error {
 		case "thinking_delta":
 			emit(Event{Kind: KThink, Text: ev.Delta.Thinking})
 		case "signature_delta":
-			emit(Event{Kind: KSig, Text: ev.Delta.Signature})
+			emit(Event{Kind: KSig, Name: sealAnthropic, Text: ev.Delta.Signature})
 		}
 	case "message_delta":
 		if ev.Delta.StopReason != "" {
