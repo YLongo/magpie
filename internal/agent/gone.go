@@ -64,6 +64,11 @@ func (a *Agent) cliHeld() (held, known bool) {
 		at = []string{filepath.Join(home, ".codex", "packages", "standalone")}
 	case "hermes":
 		at = []string{filepath.Join(a.Dir, "hermes-agent")}
+		// a profile magpie connects (hermesActive): the checkout is in
+		// the root its profiles are under
+		if filepath.Base(filepath.Dir(a.Dir)) == "profiles" {
+			at = append(at, filepath.Join(filepath.Dir(filepath.Dir(a.Dir)), "hermes-agent"))
+		}
 	case "pi":
 		// Pi's installer puts pi in its agent folder's bin/, which only a
 		// shell profile adds to PATH; the login shell UserPath asked can
