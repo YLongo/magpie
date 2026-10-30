@@ -104,6 +104,28 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         assert(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), "the page scrolls sideways");
         await context.close();
       }
+
+      // on and running, the switch and the Restart button share the card's
+      // line, centred alike (segs start at their row's top by default)
+      {
+        const world = { posts: [], gateway: { off: false, running: true, mine: true }, answer: () => ({ ok: true }) };
+        const context = await browser.newContext({ viewport: { width: 900, height: 520 }, reducedMotion: "reduce" });
+        const page = await context.newPage();
+        page.setDefaultTimeout(5000);
+        page.on("pageerror", (e) => errors.push(e.message));
+        await page.route("**/*", fixture(lang, world));
+        await page.goto("http://magpie.test/?view=gateway");
+        await page.locator("#gateway .segs").waitFor();
+        await page.locator("#gateway .gw-fix").waitFor();
+        const gap = await page.evaluate(() => {
+          const a = document.querySelector("#gateway .segs").getBoundingClientRect();
+          const b = document.querySelector("#gateway .gw-fix").getBoundingClientRect();
+          return { line: Math.abs(a.top - b.top), centre: Math.abs((a.top + a.bottom) - (b.top + b.bottom)) / 2 };
+        });
+        assert.ok(gap.line < 1, `the switch and the button sit on different lines: ${JSON.stringify(gap)}`);
+        assert.ok(gap.centre <= 1, `the switch and the button are not centred alike: ${JSON.stringify(gap)}`);
+        await context.close();
+      }
       assert.deepEqual(errors, []);
     });
   }
