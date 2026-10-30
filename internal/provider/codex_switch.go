@@ -24,7 +24,10 @@ package provider
 // to it, as Smart gives it requests again then (#408). A switch the user
 // makes meanwhile ends that. With KeepLogin on the subscription, the agent
 // stays signed in to the first, whatever it has left (#524); with
-// KeepLoginAs, to that account, wherever it stands in the order.
+// KeepLoginAs, to that account, wherever it stands in the order. Not while
+// magpie only switches the sign-in (SwitchOnly): moving it is then all
+// magpie is asked to do, and kept on one account nothing would ever move
+// (#1907, keepsLogin).
 
 import (
 	"context"
@@ -121,11 +124,11 @@ func SpentShareOf(routing string) float64 {
 
 // loginSwitching is how magpie moves agent's sign-in, as its subscription
 // says: the share the account it is on is moved off at, and whether it is
-// kept on the first instead (KeepLogin).
+// kept on the first instead (keepsLogin).
 func loginSwitching(agent string) (share float64, keep bool) {
 	for _, p := range load().Providers {
 		if p.ID == agent {
-			return SpentShareOf(p.Routing), p.KeepLogin
+			return SpentShareOf(p.Routing), p.keepsLogin()
 		}
 	}
 	return SpentShare, false
@@ -237,7 +240,14 @@ func NextLogin(ctx context.Context, agent string) (from, to string, back, ok boo
 	if keep && first != nil && first.On && first.Lapsed == "" {
 		return from, first.User, true, true
 	}
-	u := LoginUsage(ctx, agent)
+	// the account it is on, and the one it goes back to, are read; the
+	// spares only once the one it is on is spent (below): every account
+	// read at once on each look was a burst no official client makes
+	var firstUser string
+	if first != nil {
+		firstUser = first.User
+	}
+	u := someLoginUsage(ctx, agent, from, firstUser)
 	now := time.Now()
 	// an account at its usage cap is spent as one at the share below
 	// (account_caps.go): it is moved off, and none is moved to or back to
@@ -261,6 +271,13 @@ func NextLogin(ctx context.Context, agent string) (from, to string, back, ok boo
 	q, known := u[from]
 	if keep || !known || q.Error != "" || !q.Held && !usedPast(q, share, now) && !capped(from, q) {
 		return "", "", false, false
+	}
+	users := make([]string, 0, len(spares))
+	for _, l := range spares {
+		users = append(users, l.User)
+	}
+	for user, q := range someLoginUsage(ctx, agent, users...) {
+		u[user] = q
 	}
 	for _, l := range spares {
 		if q, known := u[l.User]; known && q.Error == "" && !q.Held && !usedPast(q, share, now) && !capped(l.User, q) {
@@ -425,6 +442,8 @@ func KeepOnAnAccountWithRoom(ctx context.Context) {
 		c, cancel := context.WithTimeout(ctx, time.Minute)
 		noteCodexUsedUp(CodexUsedUp(c))
 		cancel()
+		// Codex's own sign-in refused for good, or signed in again since
+		noteCodexGoneNow()
 		t.Reset(codexLookEvery(knownLoginUsage("codex")))
 	}
 }

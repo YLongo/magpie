@@ -1527,7 +1527,10 @@
     const box = el("div", "pm-bounce"), s = document.createElementNS("http://www.w3.org/2000/svg", "svg"), b = el("div", "sk-bird");
     s.innerHTML = "<path/><path/><path/><path/>";
     b.innerHTML = BIRD;
-    box.append(s, b);
+    // with Settings' Loading bird off, the strings stand still, birdless
+    const off = birdOff();
+    box.append(s);
+    if (!off) box.append(b);
     const ps = [...s.children], ws = [1, .94, .6, .82], at = [.16, .44, .3, .58];
     const L = ws.map((w, i) => ({ y: 31 + i * 22, d: 0, v: 0, bx: 0, hold: false }));
     // the bird is placed by its feet: f faces it, r leans it, sx/sy squash it
@@ -1549,10 +1552,15 @@
       requestAnimationFrame(step);
     });
     const easeIn = (t) => t * t * t, easeOut = (t) => 1 - (1 - t) ** 3;
+    // a README waits for three landings (the owner, 10-30), 3s at most
+    let ready;
+    box.ready = new Promise((ok) => { ready = ok; });
+    setTimeout(ready, 3000);
     (async () => {
       await new Promise(requestAnimationFrame);
       if (!box.isConnected || gone) return;
       W = box.clientWidth;
+      if (off) return draw();
       if (calm()) return draw(), put({ x: at[0] * W, y: L[0].y - 5 });
       // each string a damped spring, let go of when the bird leaves it
       (async () => {
@@ -1579,6 +1587,7 @@
           await tween(90, (e) => { put({ y: top + deep * (1 - e), sx: 1.16 - .16 * e, sy: .8 + .3 * e }); l.d = y - top; }, easeIn);
           l.hold = false;
           l.v = -deep * 14;
+          if (i === 2) ready();
           const xa = x, ya = y;
           if (i + 1 < L.length) {
             const xb = at[i + 1] * W, yb = L[i + 1].y - 5;
@@ -1593,8 +1602,9 @@
           }
         }
       }
-    })().catch(() => {});
+    })().catch(() => {}).finally(ready);
     box.leave = () => {
+      if (off) return box.remove();
       gone = true;
       box.dataset.gone = b.dataset.flap = "";
       const xa = x, ya = y;
@@ -1604,6 +1614,12 @@
     };
     return box;
   }
+
+  // a README read once shows at once when its page opens again, birdless,
+  // and is read again quietly (the owner, 10-30). The last 20 opened only,
+  // a Map in the order they were: the oldest goes first
+  const pages = new Map();
+  const keep = (k, p) => { pages.delete(k); pages.set(k, p); if (pages.size > 20) pages.delete(pages.keys().next().value); };
 
   // the plugin's page: what it is, what npm says of it, and its README
   async function detail(l) {
@@ -1669,7 +1685,13 @@
     }
     if (l.replaces) main.append(el("p", "pm-note", t("magpie's own sign-in to this subscription is deprecated: this plugin takes its place, and accounts signed in there move to it.")));
     const readme = el("div", "pm-readme");
-    readme.append(bounceLoader());
+    const had = pages.get(l.package);
+    const day = (p) => {
+      const at = l.github && !entryOf(l.package) ? l.github.pushed : p.updated;
+      upd.textContent = at && !at.startsWith("0001") ? new Date(at).toLocaleDateString(intlLang(), { year: "numeric", month: "short", day: "numeric" }) : "—";
+    };
+    if (had) day(had);
+    readme.append(had ? markdown(had.readme || t("No README")) : bounceLoader());
     main.append(readme);
     ed.append(main);
     const bar = el("div", "bar");
@@ -1685,7 +1707,9 @@
     // the README takes the skeleton's place, and the dialog grows to it on
     // the spring it opened on, centred as it goes, not in one jump; the
     // bird flies off over it
-    const fill = (n) => {
+    const fill = async (n) => {
+      await readme.querySelector(".pm-bounce")?.ready;
+      if (!ed.isConnected) return;
       const d = ed.parentElement, h = d.offsetHeight, y = d.style.top, wait = readme.querySelector(".pm-bounce");
       const m = d.parentElement, at = wait?.getBoundingClientRect(), o = m.getBoundingClientRect();
       readme.replaceChildren(n);
@@ -1703,10 +1727,12 @@
     };
     try {
       const p = await api("plugins/page?name=" + encodeURIComponent(l.package));
-      const at = l.github && !entryOf(l.package) ? l.github.pushed : p.updated;
-      upd.textContent = at && !at.startsWith("0001") ? new Date(at).toLocaleDateString(intlLang(), { year: "numeric", month: "short", day: "numeric" }) : "—";
-      fill(markdown(p.readme || t("No README")));
+      keep(l.package, p);
+      day(p);
+      if (!had) fill(markdown(p.readme || t("No README")));
+      else if (p.readme !== had.readme) readme.replaceChildren(markdown(p.readme || t("No README")));
     } catch (e) {
+      if (had) return;
       upd.textContent = "—";
       fill(el("p", "pm-note", t(l.github && isGit(l.package) && !entryOf(l.package) ? "GitHub didn't answer: {error}" : local ? "Couldn't read the folder's README: {error}" : "npm didn't answer: {error}", { error: e.message })));
     }

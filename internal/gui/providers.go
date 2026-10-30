@@ -42,6 +42,7 @@ type modelJSON struct {
 	ImageSet   bool     `json:"imageSet,omitempty"`  // the user said so, rather than its vendor
 	Own        bool     `json:"ownImages,omitempty"` // its vendor's answer, which a staged Restore default shows
 	On         bool     `json:"on"`                  // exposed to agents
+	Best       bool     `json:"best,omitempty"`      // the newest of its family in the list: what Best in family serves (provider.NewestInFamily)
 	Context    int      `json:"context,omitempty"`   // the window agents are told: the user's, else Listed
 	Output     int      `json:"output,omitempty"`    // the reply limit agents are told: provider.ReplyLimit within Context (provider.OutputWithin)
 	Listed     int      `json:"listed,omitempty"`    // its window before the user's: its vendor's list's, else models.dev's
@@ -87,6 +88,8 @@ type providerJSON struct {
 	Headers   map[string]string `json:"headers,omitempty"`
 	// JSON fields added to each request's body (provider.ExtraBody, #1604)
 	ExtraBody provider.ExtraBody `json:"extraBody,omitempty"`
+	// headers of the vendor's reply passed on (provider.ReplyHeaders, #4145)
+	ReplyHeaders []string `json:"replyHeaders,omitempty"`
 	// the API the user gave a custom provider's Base URL as (BaseAPI)
 	BaseAPI string `json:"baseAPI,omitempty"`
 	// the vendor searches the web by itself (provider.Searches)
@@ -247,8 +250,13 @@ type providerJSON struct {
 	Exposed   int         `json:"exposed"`           // how many reach the agents
 	Draws     int         `json:"draws,omitempty"`   // how many of its models draw images (gateway.Drawers)
 	DrawIDs   []string    `json:"drawIds,omitempty"` // those models' ids, listed apart in its editor
-	Unlisted  bool        `json:"unlisted"`          // its models serve only through routing groups
-	NoModels  bool        `json:"noModels"`          // Select none: none of its models served (#1818)
+	// those of them unticked in its editor (provider.HiddenDrawers)
+	HiddenDrawers []string `json:"hiddenDrawers,omitempty"`
+	Unlisted      bool     `json:"unlisted"` // its models serve only through routing groups
+	NoModels      bool     `json:"noModels"` // Select none: none of its models served (#1818)
+	// Best in family: with nothing picked, only the newest model of each
+	// family it lists is served (provider.Provider.BestInFamily)
+	BestInFamily bool `json:"bestInFamily"`
 	// Groups are the routing groups ("group/<id>") each of its models is
 	// in, by model id: what an unlisted one is still used through, and the
 	// editor names those in none
@@ -603,9 +611,9 @@ func providerInfoWith(p provider.Provider, agents []agentUse, desktop map[string
 		ID: p.ID, Name: p.Name, Icon: p.Icon, Preset: p.Preset, Host: p.Host(),
 		Chat: p.Chat, Responses: p.Responses, Anthropic: p.Anthropic, Gemini: p.Gemini, Decide: p.Decide, BaseAPI: p.BaseAPI, ModelTest: p.ModelTest(), TestsAs: p.TestClients(), DecideTest: p.AsksDecideModels(), MarksKinds: p.MarksKinds(),
 		Catalog: p.Catalog, Website: p.Website, KeysURL: p.KeysURL,
-		Proxy: p.Proxy, AccountProxies: p.AccountProxies, AccountModels: p.AccountModels, AccountCaps: p.AccountCaps, AccountWindowCaps: p.AccountWindowCaps, AccountNames: p.AccountNames, Headers: p.Headers, ExtraBody: p.ExtraBody, Searches: p.Searches, Cline: p.ClinePinnable(), PinUpstream: p.PinUpstream, Unredacted: p.Unredacted, InsecureTLS: p.InsecureTLS, TakesInsecureTLS: p.TakesInsecureTLS(), LimitRestOff: p.LimitRestOff, NativeCompaction: p.NativeCompaction, CarriesCompaction: p.CarriesCompaction(), PassUserAgent: p.PassUserAgent, OwnClient: p.OwnClient(), AuthHeader: p.AuthHeader, BothAuth: p.BothAuth(), BalanceURL: p.BalanceURL, BalancePath: p.BalancePath, BalanceMethod: p.BalanceMethod, ModelsURL: p.ModelsURL,
+		Proxy: p.Proxy, AccountProxies: p.AccountProxies, AccountModels: p.AccountModels, AccountCaps: p.AccountCaps, AccountWindowCaps: p.AccountWindowCaps, AccountNames: p.AccountNames, Headers: p.Headers, ExtraBody: p.ExtraBody, ReplyHeaders: p.ReplyHeaders, Searches: p.Searches, Cline: p.ClinePinnable(), PinUpstream: p.PinUpstream, Unredacted: p.Unredacted, InsecureTLS: p.InsecureTLS, TakesInsecureTLS: p.TakesInsecureTLS(), LimitRestOff: p.LimitRestOff, NativeCompaction: p.NativeCompaction, CarriesCompaction: p.CarriesCompaction(), PassUserAgent: p.PassUserAgent, OwnClient: p.OwnClient(), AuthHeader: p.AuthHeader, BothAuth: p.BothAuth(), BalanceURL: p.BalanceURL, BalancePath: p.BalancePath, BalanceMethod: p.BalanceMethod, ModelsURL: p.ModelsURL,
 		Ready: p.Ready(), Chosen: p.Picks(), Models: []modelJSON{}, Agents: []providerAgent{},
-		Fallback: p.Fallback, Routing: p.Routing, Sink: p.Sink, Affinity: p.Affinity, KeepLogin: p.KeepLogin, KeepLoginAs: p.KeepLoginAs, SwitchOnly: p.SwitchOnly, CapStop: p.CapStop, CapCareful: p.CapCareful, Unlisted: p.Unlisted, NoModels: p.ServesNone(), Off: p.Off, Contexts: p.Contexts,
+		Fallback: p.Fallback, Routing: p.Routing, Sink: p.Sink, Affinity: p.Affinity, KeepLogin: p.KeepLogin, KeepLoginAs: p.KeepLoginAs, SwitchOnly: p.SwitchOnly, CapStop: p.CapStop, CapCareful: p.CapCareful, Unlisted: p.Unlisted, NoModels: p.ServesNone(), BestInFamily: p.BestInFamily && len(p.Models) == 0 && !p.NoModels, Off: p.Off, Contexts: p.Contexts,
 		MaxConcurrency: p.MaxConcurrency, PluginConcurrency: p.PluginConcurrency(), PriceRate: p.PriceRate,
 		AccountConcurrency: p.AccountConcurrency, QueueLimit: p.QueueLimit, QueueWait: p.QueueWait, MaxRPM: p.MaxRPM,
 		Outputs: provider.OutputsOf(p.ID), Compacts: provider.CompactsOf(p.ID),
@@ -722,6 +730,11 @@ func providerInfoWith(p provider.Provider, agents []agentUse, desktop map[string
 	for _, m := range p.Exposed() {
 		exposed[m.ID] = true
 	}
+	avail := p.Available()
+	newest := map[string]bool{}
+	for _, m := range p.NewestInFamily(avail) {
+		newest[m.ID] = true
+	}
 	seen := map[string]bool{}
 	names, kept := p.ModelNames(), p.ModelEfforts()
 	held := settings.Load()
@@ -747,7 +760,7 @@ func providerInfoWith(p provider.Provider, agents []agentUse, desktop map[string
 			images = said
 		}
 		window := p.WindowOf(m)
-		j := modelJSON{ID: m.ID, Name: m.Name, Efforts: provider.EffortsOf(m), On: on, Context: window, Output: provider.OutputWithin(window, p.ReplyLimitIn(m, set)), Listed: provider.ListedWindow(m), Max: m.MaxContext, Free: m.Free, Rate: m.Rate, RateWas: m.RateWas, Images: images, ImageSet: imageSet, Own: own}
+		j := modelJSON{ID: m.ID, Name: m.Name, Efforts: provider.EffortsOf(m), On: on, Context: window, Output: provider.OutputWithin(window, p.ReplyLimitIn(m, set)), Listed: provider.ListedWindow(m), Max: m.MaxContext, Free: m.Free, Rate: m.Rate, RateWas: m.RateWas, Images: images, ImageSet: imageSet, Own: own, Best: newest[m.ID]}
 		if i := slices.IndexFunc(most, func(c catalog.Model) bool { return c.ID == m.ID }); j.Max == 0 && i >= 0 {
 			j.Max = most[i].MaxContext
 		}
@@ -794,7 +807,7 @@ func providerInfoWith(p provider.Provider, agents []agentUse, desktop map[string
 		}
 		return j
 	}
-	for _, m := range p.Available() {
+	for _, m := range avail {
 		seen[m.ID] = true
 		out.Models = append(out.Models, named(m, exposed[m.ID]))
 	}
@@ -827,6 +840,11 @@ func providerInfoWith(p provider.Provider, agents []agentUse, desktop map[string
 		out.DrawIDs = append(out.DrawIDs, m.ID)
 	}
 	out.Draws = len(out.DrawIDs)
+	for _, id := range out.DrawIDs {
+		if p.DrawerHidden(id) {
+			out.HiddenDrawers = append(out.HiddenDrawers, id)
+		}
+	}
 	if t, ok := p.Listed(); ok {
 		out.Fetched = &t
 	}
@@ -1291,6 +1309,9 @@ func providerRoutes(mux *http.ServeMux, w Windows) {
 			// NoModels, for save: the editor's Select none, kept with no
 			// model picked (#1818); a save that leaves it out keeps it
 			NoModels *bool `json:"noModels"`
+			// BestInFamily, for save: the editor's Best in family, kept
+			// with no model picked; a save that leaves it out keeps it
+			BestInFamily *bool `json:"bestInFamily"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			fail(rw, err)
@@ -1299,6 +1320,9 @@ func providerRoutes(mux *http.ServeMux, w Windows) {
 		in := req.Provider
 		if req.NoModels != nil {
 			in.NoModels = *req.NoModels
+		}
+		if req.BestInFamily != nil {
+			in.BestInFamily = *req.BestInFamily
 		}
 		if req.Routing != nil {
 			in.Routing = *req.Routing
@@ -1391,7 +1415,9 @@ func providerRoutes(mux *http.ServeMux, w Windows) {
 				pr.Key, pr.Models, pr.Fallback, pr.Headers, pr.BalanceToken, pr.Contexts = in.Key, in.Models, in.Fallback, in.Headers, in.BalanceToken, in.Contexts
 				pr.ZhipuTeam = in.ZhipuTeam
 				pr.NoModels = in.NoModels
+				pr.BestInFamily = in.BestInFamily
 				pr.ExtraBody = in.ExtraBody
+				pr.ReplyHeaders = in.ReplyHeaders
 				pr.SecretAccessKey = in.SecretAccessKey
 				pr.Vertex = in.Vertex
 				pr.Searches = in.Searches
@@ -1408,6 +1434,7 @@ func providerRoutes(mux *http.ServeMux, w Windows) {
 				// back to Smart (fflake33 on Discord)
 				pr.Routing, pr.Affinity, pr.Sink = in.Routing, in.Affinity, in.Sink
 				pr.Unlisted = in.Unlisted
+				pr.HiddenDrawers = in.HiddenDrawers
 				pr.AccountProxies = in.AccountProxies
 				if in.Name != "" {
 					pr.Name = in.Name
@@ -1425,6 +1452,11 @@ func providerRoutes(mux *http.ServeMux, w Windows) {
 			// fields the body can't be given are refused, not dropped
 			// unseen (#1604)
 			if why := provider.ExtraBodyOK(in.ExtraBody); why != "" {
+				fail(rw, errors.New(why))
+				return
+			}
+			// and reply headers magpie never passes on (#4145)
+			if why := provider.ReplyHeadersOK(in.ReplyHeaders); why != "" {
 				fail(rw, errors.New(why))
 				return
 			}
@@ -1603,6 +1635,11 @@ func providerRoutes(mux *http.ServeMux, w Windows) {
 					in.AccountConcurrency = old.AccountConcurrency
 					in.AccountNames = old.AccountNames // with accountname
 				}
+				// the image models unticked in its editor likewise: []
+				// shows them all (321sssrt on X)
+				if in.HiddenDrawers == nil && old != nil {
+					in.HiddenDrawers = old.HiddenDrawers
+				}
 				// a Zhipu key's team likewise: {} clears it
 				if in.ZhipuTeam == nil && old != nil {
 					in.ZhipuTeam = old.ZhipuTeam
@@ -1611,9 +1648,17 @@ func providerRoutes(mux *http.ServeMux, w Windows) {
 				if in.ExtraBody == nil && old != nil {
 					in.ExtraBody = old.ExtraBody
 				}
+				// and the reply headers passed on: [] clears them
+				if in.ReplyHeaders == nil && old != nil {
+					in.ReplyHeaders = old.ReplyHeaders
+				}
 				// Select none likewise, while nothing is picked (#1818)
 				if req.NoModels == nil && old != nil {
 					in.NoModels = old.NoModels
+				}
+				// and Best in family (normalize drops it under a pick)
+				if req.BestInFamily == nil && old != nil {
+					in.BestInFamily = old.BestInFamily
 				}
 				// a Volcengine access key likewise: its ID kept when left
 				// out or sent blank (an editor opened before the key was
