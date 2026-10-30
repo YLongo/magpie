@@ -180,6 +180,7 @@ func TestSettingsSaveKeepsWhatItDoesNotSend(t *testing.T) {
 		DesktopLongest:       true,
 		GuideHidden:          true,
 		GatewayMode:          "off",
+		GatewayOff:           true,
 		QuotaReads:           "asked",
 		NoAccountDiscovery:   true,
 		RedactModel:          true,

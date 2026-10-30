@@ -93,8 +93,9 @@ function renderGatewayView() {
 // version or newer serving it gets none: that one is not to be quit here.
 // What stood in the way stays under it until the gateway's state changes.
 let gatewayFix = { busy: false, err: "", when: "" };
-const gatewayFixWhen = (g) => [g.running, g.mine, g.version || ""].join("|");
+const gatewayFixWhen = (g) => [g.running, g.mine, g.version || "", g.off].join("|");
 function gatewayFixButton(g, older) {
+  if (g.off) return null;
   if (g.running && !g.mine && !older) return null;
   // bordered: a plain text button read as words on the card in dark mode
   const b = el("button", "text action gw-fix");
@@ -131,8 +132,35 @@ function gatewayFixSays(o) {
       ? t("Port {port} is in use by {path} (pid {pid}): quit it, or move the gateway to another port in Settings.", p)
       : t("Port {port} is in use by another program: quit it, or move the gateway to another port in Settings.", p);
     case "other": return t("magpie {v} serves the gateway, and it isn't older than this one: quit it there to serve the gateway here.", p);
+    case "off": return t("The gateway is turned off. Turn it on with the switch beside its state.");
   }
   return t("The gateway couldn't be served here: {error}", p);
+}
+
+// The page's switch (settings' gatewayOff): off, the app serves no
+// gateway at all — its window and background work go on, but no agent's
+// request reaches magpie's models until it is on again. On serves it at
+// once, unless another magpie has the port (said under the card).
+let gatewayOffBusy = false;
+function gatewaySwitch(g) {
+  const sw = segs([["on", t("On")], ["off", t("Off")]], g.off ? "off" : "on", (v) => {
+    if (gatewayOffBusy || (v === "off") === !!g.off) return;
+    gatewayOffBusy = true;
+    renderGateway();
+    (async () => {
+      let out;
+      try { out = await api("gateway/off", { off: v === "off" }); } catch (e) { out = { reason: "error", error: e.message }; }
+      try { await loadProviders(); } catch {}
+      gatewayOffBusy = false;
+      // a turn-on that didn't take the port is said under the card, tied
+      // to the state it left (still off)
+      if (!out?.ok) gatewayFix = { busy: false, err: gatewayFixSays(out || {}), when: gatewayFixWhen(providers.gateway) };
+      if (view === "gateway" && providers) renderGatewayView();
+    })();
+  });
+  sw.setAttribute("role", "group");
+  sw.setAttribute("aria-label", t("Serve the gateway"));
+  return sw;
 }
 
 // The status card: the gateway's mark, its state and what it does, and the
@@ -152,17 +180,19 @@ function renderGateway() {
   const name = el("div", "name", t("Gateway"));
   name.append(el("span", "state", older
     ? t("running · served by magpie {v}, older than this one", { v: g.version })
-    : t(g.running ? (g.mine ? "running" : "running · served by another magpie") : "not running")));
+    : t(g.off && !g.running ? "off" : g.running ? (g.mine ? "running" : "running · served by another magpie") : "not running")));
   const routed = new Set();
   for (const p of providers.providers) for (const a of p.agents) if (a.current) routed.add(a.id);
   const n = routed.size;
   if (older) {
     who.append(name, el("div", "sub old", t("Agents' requests go through magpie {v} and are sent as it sends them, without this version's fixes. Quit it here and this one serves the gateway at once.", { v: g.version })));
+  } else if (g.off) {
+    who.append(name, el("div", "sub", t("The gateway is off. No agent reaches magpie's models until it is on again; magpie's window and its background work go on.")));
   } else who.append(name, el("div", "sub", g.running
     ? [t(g.models === 1 ? "{n} model" : "{n} models", { n: g.models }), n ? t(n === 1 ? "{n} agent routed through it" : "{n} agents routed through it", { n }) : t("no agent routed through it yet"), t("five APIs, one URL")].join(" · ")
     : t("start it with magpie serve, or open magpie at login")));
   if (gatewayFix.err && gatewayFix.when === gatewayFixWhen(g)) who.append(el("div", "sub old err", gatewayFix.err));
-  box.append(mark, who);
+  box.append(mark, who, gatewaySwitch(g));
   const fix = gatewayFixButton(g, older);
   if (fix) box.append(fix);
 }

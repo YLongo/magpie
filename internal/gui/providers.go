@@ -452,6 +452,10 @@ type gatewayJSON struct {
 	Running   bool `json:"running"`
 	Mine      bool `json:"mine"`   // this process serves it
 	Window    bool `json:"window"` // the magpie serving it shows its routing
+	// Off is the Gateway page's switch: the app serves no gateway while it
+	// is on, and nothing starts one (settings.GatewayOff). Running may be
+	// true beside it, another magpie's.
+	Off bool `json:"off,omitempty"`
 	// Version is another magpie's, serving it, and Older says it is older
 	// than this one: agents' requests are then sent as that version sends
 	// them, without this one's fixes (#506)
@@ -933,6 +937,7 @@ func providersState() providersJSON {
 	}
 	cat := provider.Catalog()
 	s.Gateway = gatewayJSON{URL: gateway.URL(), OnNetwork: gateway.OnNetwork(), Models: len(cat), Calls: []gateway.Call{}, Groups: []gwGroupJSON{}}
+	s.Gateway.Off = settings.Load().GatewayOff
 	s.Gateway.LAN = settings.Load().LAN || s.Gateway.OnNetwork
 	if s.Gateway.LAN {
 		s.Gateway.LANURLs = gateway.LANURLs()

@@ -11,6 +11,7 @@ import (
 
 	"github.com/yetone/magpie/internal/gateway"
 	"github.com/yetone/magpie/internal/proc"
+	"github.com/yetone/magpie/internal/settings"
 )
 
 // The Gateway page's button (leslie_luo on Discord): with an older magpie
@@ -33,7 +34,8 @@ type gatewayFixJSON struct {
 	// "respawned" (something started a magpie on the port again at once:
 	// a LaunchAgent, a systemd unit, a scheduled task), "taken" (the
 	// gateway couldn't listen: another program has the port), "other"
-	// (a magpie not older than this one serves; quit it there), "error"
+	// (a magpie not older than this one serves; quit it there), "off" (the
+	// gateway is turned off; the switch on the page turns it on), "error"
 	Reason  string `json:"reason,omitempty"`
 	PID     int    `json:"pid,omitempty"`
 	Path    string `json:"path,omitempty"`
@@ -62,6 +64,9 @@ var (
 // takeOverGateway quits the magpie serving the gateway, when there is one,
 // and serves it here.
 func takeOverGateway() gatewayFixJSON {
+	if settings.Load().GatewayOff {
+		return gatewayFixJSON{Reason: "off"}
+	}
 	gatewayMu.Lock()
 	defer gatewayMu.Unlock()
 	if served.Load() != nil {
@@ -79,6 +84,9 @@ func takeOverGateway() gatewayFixJSON {
 // again; with none served here and none answering, it starts it. A magpie
 // serving it elsewhere is left alone: that is the take-over's to quit.
 func restartGateway() gatewayFixJSON {
+	if settings.Load().GatewayOff {
+		return gatewayFixJSON{Reason: "off"}
+	}
 	gatewayMu.Lock()
 	defer gatewayMu.Unlock()
 	if gw := served.Load(); gw != nil {

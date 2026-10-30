@@ -1265,6 +1265,7 @@ func Handler(w Windows, gw *gateway.Server) http.Handler {
 	configRepairRoutes(mux, !isWeb(w))
 	gatewayFixRoutes(mux)
 	gatewayModeRoutes(mux)
+	gatewayOffRoutes(mux)
 	if !isWeb(w) {
 		appPageRoutes(mux)
 	}
@@ -1455,6 +1456,8 @@ func Handler(w Windows, gw *gateway.Server) http.Handler {
 		in.UpdateMirror = cur.UpdateMirror
 		// gateway mode, set on its own (gateway-mode)
 		in.GatewayMode = cur.GatewayMode
+		// the gateway's switch, set on its own (gateway/off)
+		in.GatewayOff = cur.GatewayOff
 		in.NoAccountDiscovery = cur.NoAccountDiscovery // set on its own (account-discovery below, or the CLI)
 		if v := strings.TrimSpace(in.Vision); v != "" && v != "off" && v != cur.Vision {
 			if _, _, ok := provider.Resolve(v); !ok {

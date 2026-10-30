@@ -13,6 +13,7 @@ import (
 	"github.com/yetone/magpie/internal/filememo"
 	"github.com/yetone/magpie/internal/gateway"
 	"github.com/yetone/magpie/internal/provider"
+	"github.com/yetone/magpie/internal/settings"
 	"github.com/yetone/magpie/internal/update"
 	"github.com/yetone/magpie/internal/usage"
 )
@@ -126,6 +127,11 @@ func serveGateway() *gateway.Server {
 }
 
 func serveGatewayLocked() *gateway.Server {
+	// turned off on the Gateway page: nothing starts it — not this call
+	// (a start, a restart), nor the watch below taking the port back
+	if settings.Load().GatewayOff {
+		return nil
+	}
 	// handing over, the one there is this one's predecessor, which lets go
 	// once this one listens beside it
 	// so is the one that handed this one its socket, still finishing its
